@@ -28,10 +28,7 @@ param(
     [string]$WindowsHello = 'Ask',
 
     [string]$InstallDir = 'C:\KinectCamV21',
-    [string]$LogPath    = (Join-Path $env:TEMP 'KinectCamV2-install.log'),
-
-    # 不装托盘设置程序（也就不会开机自启）
-    [switch]$SkipTray
+    [string]$LogPath    = (Join-Path $env:TEMP 'KinectCamV2-install.log')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -133,30 +130,6 @@ function Get-FileHolder {
     return $holders
 }
 
-# 文件被正在运行的程序锁住时，交给系统在下次开机替换（写 PendingFileRenameOperations）
-$delayedReplaceSource = @'
-using System;
-using System.Runtime.InteropServices;
-public static class DelayedFileOps {
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    static extern bool MoveFileEx(string existing, string target, int flags);
-    public static bool ReplaceOnReboot(string source, string target) {
-        return MoveFileEx(source, target, 0x1 /*REPLACE_EXISTING*/ | 0x4 /*DELAY_UNTIL_REBOOT*/);
-    }
-}
-'@
-
-function Set-DelayedReplace {
-    param([string]$Source, [string]$Target)
-    try {
-        if (-not ('DelayedFileOps' -as [type])) { Add-Type -TypeDefinition $delayedReplaceSource -ErrorAction Stop }
-        return [DelayedFileOps]::ReplaceOnReboot($Source, $Target)
-    }
-    catch {
-        return $false
-    }
-}
-
 # ============ 提权（提问必须在提权之前，否则新窗口里看不见） ============
 if (-not (Test-Elevated)) {
     if ($env:KINECTCAM_NO_ELEVATE) {
@@ -172,7 +145,6 @@ if (-not (Test-Elevated)) {
         '-InstallDir',   ('"{0}"' -f $InstallDir),
         '-LogPath',      ('"{0}"' -f $LogPath)
     )
-    if ($SkipTray) { $argList += '-SkipTray' }
     try {
         $proc = Start-Process -FilePath $shell -ArgumentList $argList -Verb RunAs `
                               -WindowStyle Hidden -Wait -PassThru
@@ -183,15 +155,6 @@ if (-not (Test-Elevated)) {
                               -Wait -PassThru
     }
     if (Test-Path -LiteralPath $LogPath) { Get-Content -LiteralPath $LogPath | Write-Host }
-
-    # 托盘程序要在非提权环境下启动，否则它自己会带管理员权限
-    $trayExe = Join-Path $InstallDir 'KinectCamTray.exe'
-    if (-not $SkipTray -and (Test-Path -LiteralPath $trayExe)) {
-        Get-Process KinectCamTray -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Milliseconds 500
-        Start-Process -FilePath $trayExe
-        Write-Host 'KinectCamTray 已启动（看右下角托盘，可能折叠在 ^ 里）'
-    }
     exit $proc.ExitCode
 }
 
@@ -210,7 +173,7 @@ Write-Log "Windows Hello: $WindowsHello"
 $rebootNeeded = $false
 
 # ============ 第 1 步：DirectShow 虚拟摄像头 ============
-Write-Log '--- [1/3] DirectShow 虚拟摄像头 (KinectCamV2) ---'
+Write-Log '--- [1/2] DirectShow 虚拟摄像头 (KinectCamV2) ---'
 
 foreach ($arch in 'x86', 'x64') {
     $source = Join-Path $payloadRoot "bin\$arch"
@@ -224,10 +187,9 @@ foreach ($arch in 'x86', 'x64') {
     New-Item -ItemType Directory -Force -Path $target | Out-Null
 
     # 逐个文件复制：某个文件被占用时（常见是相机/生物识别相关服务），
-    # 先排队到下次开机替换；实在不行才沿用旧文件。
+    # 只要目标已存在旧文件就沿用，不让整个安装失败。
     $copied = 0
     $locked = @()
-    $pending = @()
     foreach ($file in Get-ChildItem -LiteralPath $source -File) {
         $dest = Join-Path $target $file.Name
         try {
@@ -235,30 +197,15 @@ foreach ($arch in 'x86', 'x64') {
             $copied++
         }
         catch {
-            if (-not (Test-Path -LiteralPath $dest)) { throw }
-
-            # 被占用：把新文件放到 .new，让系统在重启时替换过去
-            $staged = $dest + '.new'
-            try {
-                Copy-Item -LiteralPath $file.FullName -Destination $staged -Force -ErrorAction Stop
-                if (Set-DelayedReplace -Source $staged -Target $dest) {
-                    $pending += $file.Name
-                    $rebootNeeded = $true
-                }
-                else {
-                    Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
-                    $locked += $file.Name
-                }
-            }
-            catch {
+            if (Test-Path -LiteralPath $dest) {
                 $locked += $file.Name
+            }
+            else {
+                throw
             }
         }
     }
     Write-Log "[$arch] 文件已就绪: $copied 个已复制 -> $target"
-    if ($pending.Count -gt 0) {
-        Write-Log "[$arch] $($pending -join ', ') 被占用，已排入重启替换队列（重启后自动换成新版本）"
-    }
     if ($locked.Count -gt 0) {
         Write-Log "[$arch] $($locked -join ', ') 正被占用，本次沿用目录里的旧文件"
         $holders = @()
@@ -316,44 +263,9 @@ foreach ($view in 'Registry64', 'Registry32') {
 }
 if ($ok -eq 0) { throw 'DirectShow 滤镜注册表校验失败。' }
 
-# ============ 第 2 步：托盘设置程序 ============
-if ($SkipTray) {
-    Write-Log '--- [2/3] 托盘设置程序: 按参数跳过 ---'
-}
-else {
-    Write-Log '--- [2/3] 托盘设置程序 (KinectCamTray) ---'
-    $traySource = Join-Path $payloadRoot 'bin\KinectCamTray.exe'
-    if (-not (Test-Path -LiteralPath $traySource)) {
-        Write-Log '安装包里没有 KinectCamTray.exe，跳过（镜像/缩放等选项只能用滤镜自带的属性页调）。'
-    }
-    else {
-        $trayTarget = Join-Path $InstallDir 'KinectCamTray.exe'
-        Get-Process KinectCamTray -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Milliseconds 300
-        Copy-Item -LiteralPath $traySource -Destination $trayTarget -Force
-        Write-Log "已复制到 $trayTarget"
-
-        # 开机自启：往当前用户的启动文件夹放快捷方式（HKCU 范围，可随时删）
-        try {
-            $startup = [Environment]::GetFolderPath('Startup')
-            $lnk = Join-Path $startup 'KinectCamTray.lnk'
-            $ws = New-Object -ComObject WScript.Shell
-            $sc = $ws.CreateShortcut($lnk)
-            $sc.TargetPath = $trayTarget
-            $sc.WorkingDirectory = $InstallDir
-            $sc.Description = 'Kinect v2 虚拟摄像头设置'
-            $sc.Save()
-            Write-Log "已设为开机启动: $lnk"
-        }
-        catch {
-            Write-Log "创建启动快捷方式失败: $($_.Exception.Message)"
-        }
-    }
-}
-
-# ============ 第 3 步：Windows Hello（可选） ============
+# ============ 第 2 步：Windows Hello（可选） ============
 if ($WindowsHello -eq 'Yes') {
-    Write-Log '--- [3/3] Windows Hello 人脸登录 ---'
+    Write-Log '--- [2/2] Windows Hello 人脸登录 ---'
 
     # 只认驱动 INF 里声明的这两个硬件 ID（Petra / Metra 的 Interface 0）。
     # 注意别用 PID_02D* 之类的宽匹配：Kinect 内置 USB Hub 是 PID_02D9，会被误命中。
@@ -416,17 +328,12 @@ if ($WindowsHello -eq 'Yes') {
     }
 }
 else {
-    Write-Log '--- [3/3] Windows Hello: 按选择跳过 ---'
+    Write-Log '--- [2/2] Windows Hello: 按选择跳过 ---'
 }
 
 # ============ 收尾 ============
 Write-Log ''
 Write-Log 'DirectShow 虚拟摄像头就绪，在任何程序里把摄像头切成 "Kinect Camera V2" 即可。'
-if (-not $SkipTray) {
-    Write-Log '托盘里的 KinectCamTray 管这个摄像头的开关：镜像 / 缩放 / 跟随头部 / 桌面捕获。'
-    Write-Log '  · 改完立即生效，并且写进 HKCU\Software\KinectCamV2 永久保存（以前是内存里，程序一退就复位）。'
-    Write-Log '  · 看不到图标就点右下角 ^ 展开，或到 设置 → 个性化 → 任务栏 → 其他系统托盘图标 里打开。'
-}
 if ($WindowsHello -eq 'Yes') {
     Write-Log 'Windows Hello 部分:'
     Write-Log '  · 需要重启后生效；重启完进 设置 → 账户 → 登录选项，先设 PIN 再录入人脸。'
@@ -435,6 +342,6 @@ if ($WindowsHello -eq 'Yes') {
     Write-Log '  · 核查脚本: ..\kinect-windows-hello\verify.ps1'
 }
 if ($rebootNeeded) {
-    Write-Log '>> 请重启电脑：上面排入替换队列的文件、以及新装的驱动，都要重启后才生效。'
+    Write-Log '>> 请重启电脑，驱动才会完全生效。'
 }
 Write-Log '安装脚本执行完毕。'

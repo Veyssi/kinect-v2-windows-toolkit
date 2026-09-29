@@ -8,13 +8,12 @@
 
 ## 装完能做什么
 
-一个脚本做三件事，第三件可选：
+一个脚本做两件事，第二件可选：
 
-| 步骤 | 内容 | 结果 |
+| 步骤 | 内容 | 程序里出现 |
 | --- | --- | --- |
-| 1 | KinectCamV2 DirectShow 虚拟摄像头（默认总是装） | 程序里出现 `Kinect Camera V2` |
-| 2 | `KinectCamTray.exe` 托盘设置程序（默认总是装） | 常驻托盘，随时切镜像 / 缩放 / 跟随头部 / 桌面捕获 |
-| 3（可选） | Kinect 的 Media Foundation 驱动 | 程序里出现 `Kinect V2 Video Sensor` + Windows Hello 刷脸 |
+| 1 | KinectCamV2 DirectShow 虚拟摄像头（默认总是装） | `Kinect Camera V2` |
+| 2（可选） | Kinect 的 Media Foundation 驱动 | `Kinect V2 Video Sensor` + Windows Hello 刷脸 |
 
 两个设备名对应两条不同的链路，各管一摊：
 
@@ -22,27 +21,6 @@
 - `Kinect V2 Video Sensor` —— Media Foundation 链路。Windows 相机 App、Teams、浏览器认它，**Windows Hello 人脸也走这条**。
 
 两条可以同时存在，互不冲突。
-
-## 托盘设置程序
-
-`KinectCamTray.exe` 常驻托盘（并自动加进当前用户的启动项），菜单里四个开关：
-
-| 开关 | 作用 |
-| --- | --- |
-| 镜像（水平翻转） | 画面左右翻转，视频通话里常需要 |
-| 缩放（2 倍中心裁剪） | 只取画面中心，看起来更近 |
-| 缩放置中跟随头部 | 配合「缩放」，画面跟着你的头移动 |
-| 桌面捕获 | 输出显示器画面而不是摄像头画面 |
-
-改完**立即生效**（滤镜侧每 300ms 轮询一次注册表），并写进 `HKCU\Software\KinectCamV2` **永久保存**。
-
-> 上游原版这四个开关只存在内存里，宿主程序一重启就全部复位；而且只有在「某个程序正在用摄像头时」
-> 才会在**那个程序的进程**里冒出托盘图标 —— 关掉程序图标就没了，Windows 11 还会把它折进
-> 「隐藏的图标」。所以这里做成了独立进程。
-
-看不到图标时：点任务栏右下角的 `^` 展开；或到 `设置 → 个性化 → 任务栏 → 其他系统托盘图标`
-里把 `KinectCamTray` 打开。程序首次运行会尝试把自己提升到任务栏
-（写 `NotifyIconSettings\IsPromoted`），该设置从**下一次启动**起生效。
 
 ## 环境要求
 
@@ -146,33 +124,11 @@ ffmpeg -f dshow -list_options true -i "video=Kinect Camera V2"
 
 ### 滤镜装不上 / x64 更新不了
 
-被程序加载过的 DLL 无法覆盖。安装脚本会查出占用者并提示，同时会先把新文件排进
-**重启替换队列**（`PendingFileRenameOperations`），下次开机由系统自动换掉，不必去关那些程序；
-想立刻生效就关掉占用者再跑一次脚本。
-
-### 托盘图标不见了
-
-`KinectCamTray` 是独立进程，正常情况下一直在。依次检查：
-
-1. 任务栏右下角 `^` 展开区里找 `KinectCamTray`
-2. 任务管理器里有没有 `KinectCamTray.exe`（没有就手动跑一下 `C:\KinectCamV21\KinectCamTray.exe`）
-3. `设置 → 个性化 → 任务栏 → 其他系统托盘图标` 里把它打开
+被程序加载过的 DLL 无法覆盖。安装脚本会查出占用者并提示，关掉对应程序后重跑即可。
 
 ## 变更记录
 
-### v3：独立托盘程序 + 设置持久化（当前 `bin\` 里的版本）
-
-- 新增 `KinectCamTray.exe`（源码在 `tools\KinectCamTray\`）：独立进程的托盘设置程序，与宿主程序无关、
-  开机自启、四个开关随点随生效。
-- 滤镜侧把四个开关从**内存变量**改为读写 `HKCU\Software\KinectCamV2`（带 300ms 缓存）：
-  设置可以持久化、可以被外部程序修改，改完不用重启任何程序。
-- 滤镜不再在宿主进程里创建托盘图标（原来的 `KinectCamApplicationContext` 已整体移除）。
-- `install.ps1`：新增托盘程序安装 + 开机启动快捷方式；DLL 被占用时自动排入重启替换队列。
-- `uninstall.ps1`：停止托盘程序、删除启动快捷方式和设置项。
-- 实测：置 `Mirrored=0` 抓一帧、改成 `Mirrored=1` 再抓一帧后对比 ——
-  「直接比较平均差 90.8 / 左右翻转后比较平均差 5.0」，确认注册表改动实时作用于滤镜。
-
-### v2：修复分辨率与像素格式
+### v2：修复分辨率与像素格式（当前 `bin\` 里的版本）
 
 上游原版只支持 1920×1080 及以上的 RGB24，这是"三方软件连不上/报被占用"的主因。本版在原版基础上补了：
 
@@ -183,12 +139,12 @@ ffmpeg -f dshow -list_options true -i "video=Kinect Camera V2"
 - 保留了上游「`GetMediaType(0)` 返回当前已设置格式」的协商逻辑 —— 少了它，应用请求 640×480 也会被按
   列表第一项连上（开发时踩过这个坑，已修正）。
 
-改动以补丁形式提供：[src/kinectcamv2.patch](src/kinectcamv2.patch)
+改动以补丁形式提供：[src/kinectcamv2-multires-yuy2.patch](src/kinectcamv2-multires-yuy2.patch)
 
 ```powershell
 git clone https://github.com/DavidObando/KinectCamV2.git
 cd KinectCamV2
-git apply ..\kinectcamv2.patch
+git apply ..\kinectcamv2-multires-yuy2.patch
 # 再用 Visual Studio / MSBuild 编译（见下方致谢里的三处工程改动）
 ```
 
@@ -200,15 +156,14 @@ x64 配置补 `AllowUnsafeBlocks`（这三处也包含在上面的补丁里）�
 ## 目录
 
 ```
-install.ps1                  一键安装（滤镜 + 托盘程序 + 可选 Hello）
-uninstall.ps1                卸载
-verify.ps1                   只读状态核查
-bin\x86, bin\x64             KinectCam.dll / BaseClassesNET.dll / Microsoft.Kinect.dll
-bin\KinectCamTray.exe        托盘设置程序
+install.ps1                 一键安装（滤镜 + 可选 Hello）
+uninstall.ps1               卸载
+verify.ps1                  只读状态核查
+bin\x86, bin\x64            KinectCam.dll / BaseClassesNET.dll / Microsoft.Kinect.dll
 tools\find-camera-holder.ps1 查是谁占用了摄像头 DLL（重启管理器实现）
-tools\KinectCamTray\         托盘程序源码
-src\kinectcamv2.patch        相对上游 KinectCamV2 的全部源码改动
-docs\windows-hello.md        Windows Hello 部分的考证与实测记录
+src\*.patch                 相对上游 KinectCamV2 的源码改动
+docs\installer-readme.md    安装脚本的详细说明
+docs\windows-hello.md       Windows Hello 部分的考证与实测记录
 ```
 
 ## 实测环境

@@ -49,21 +49,6 @@ if (-not (Test-Elevated)) {
 }
 
 # ---------- 1. 注销 DirectShow 滤镜 ----------
-Get-Process KinectCamTray -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-
-$lnk = Join-Path ([Environment]::GetFolderPath('Startup')) 'KinectCamTray.lnk'
-if (Test-Path -LiteralPath $lnk) {
-    Remove-Item -LiteralPath $lnk -Force
-    Write-Log "已删除开机启动快捷方式: $lnk"
-}
-
-foreach ($regPath in 'HKCU:\Software\KinectCamV2') {
-    if (Test-Path -LiteralPath $regPath) {
-        Remove-Item -LiteralPath $regPath -Recurse -Force
-        Write-Log "已删除设置项: $regPath"
-    }
-}
-
 foreach ($arch in 'x64', 'x86') {
     $target = Join-Path $InstallDir $arch
     $regasm = Join-Path $env:WINDIR "Microsoft.NET\$($frameworks[$arch])\v4.0.30319\RegAsm.exe"
