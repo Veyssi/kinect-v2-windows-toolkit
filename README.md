@@ -87,17 +87,83 @@ powershell -ExecutionPolicy Bypass -File .\verify.ps1
   所以 Hello 以标准模式运行 —— 识别正常，只是少了 ESS 那层额外防伪。
 - `KinectSensor` 驱动服务是按需启动（`Start=3`），锁屏后首次刷脸可能要等 1~2 秒才亮灯。
   想消除这个延迟，把该服务改成开机自启（`Start=2`）即可。
-- 滤镜第一次被调用时才打开 Kinect，前几秒黑屏属正常。
+- 滤镜第一次被调用时才打开 Kinect，**前 2～4 秒是黑屏**（Kinect 本体预热），属正常。
 - 更新系统或让 Windows Update 换掉 Kinect 驱动后，可能需要重跑一次脚本。
+
+## 常见问题
+
+### 程序报「摄像头被占用 / 无法启动摄像头」
+
+分两种，先看第二种。
+
+**1) 真的有别的程序拿着它。** 用 `tools/find-camera-holder.ps1` 查，它会用重启管理器（rStrtmgr）
+把占用进程直接列出来 —— 包括只拿着文件句柄、或带保护看不见模块的进程：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\find-camera-holder.ps1
+```
+
+查出来是谁就关掉谁，再重跑 `install.ps1`（否则那个位数还是旧版本的滤镜 —— 安装脚本会明确提示）。
+
+**2) 格式谈不拢，被程序笼统报成"被占用"。** 上游原版滤镜只提供 **1920×1080 及以上** 且 **只有 RGB24**，
+而大多数会议 / IM 客户端默认要 640×480、1280×720，或者只认 YUY2 —— 协商失败就报"占用"。
+本仓库 `bin\` 里的 DLL **已经修好这一点**（见下面的变更记录）：
+
+| 请求 | 上游原版 | 本仓库 |
+| --- | --- | --- |
+| 640×480 RGB24 | ❌ | ✅ |
+| 1280×720 RGB24 | ❌ | ✅ |
+| 640×480 YUY2 | ❌ | ✅ |
+| 1920×1080 RGB24 | ✅ | ✅ |
+
+自己确认设备到底提供什么格式，可以用 ffmpeg 列一下：
+
+```powershell
+ffmpeg -f dshow -list_options true -i "video=Kinect Camera V2"
+```
+
+### 滤镜装不上 / x64 更新不了
+
+被程序加载过的 DLL 无法覆盖。安装脚本会查出占用者并提示，关掉对应程序后重跑即可。
+
+## 变更记录
+
+### v2：修复分辨率与像素格式（当前 `bin\` 里的版本）
+
+上游原版只支持 1920×1080 及以上的 RGB24，这是"三方软件连不上/报被占用"的主因。本版在原版基础上补了：
+
+- **分辨率阶梯**：320×240 / 640×480 / 800×600 / 960×540 / 1024×768 / 1280×720 / 1600×900 /
+  1920×1080 / 2560×1440 / 3840×2160，内部把 Kinect 的 1920×1080 画面做面积平均缩放后输出。
+- **YUY2 输出**：除 RGB24 外额外提供 4:2:2（内部做 RGB→YUY2 转换），兼容只认 YUY2 的客户端。
+- **帧率范围**：30～60fps 放宽到 5～60fps。
+- 保留了上游「`GetMediaType(0)` 返回当前已设置格式」的协商逻辑 —— 少了它，应用请求 640×480 也会被按
+  列表第一项连上（开发时踩过这个坑，已修正）。
+
+改动以补丁形式提供：[src/kinectcamv2-multires-yuy2.patch](src/kinectcamv2-multires-yuy2.patch)
+
+```powershell
+git clone https://github.com/DavidObando/KinectCamV2.git
+cd KinectCamV2
+git apply ..\kinectcamv2-multires-yuy2.patch
+# 再用 Visual Studio / MSBuild 编译（见下方致谢里的三处工程改动）
+```
+
+### v1：让原版能在本机编译
+
+`Microsoft.Kinect.dll` 的 HintPath 指向 `v2.0_1409`、目标框架 `v4.5` → `v4.8`、
+x64 配置补 `AllowUnsafeBlocks`（这三处也包含在上面的补丁里）。
 
 ## 目录
 
 ```
-install.ps1              一键安装（滤镜 + 可选 Hello）
-uninstall.ps1            卸载
-verify.ps1               只读状态核查
-bin\x86, bin\x64         KinectCam.dll / BaseClassesNET.dll / Microsoft.Kinect.dll
-docs\windows-hello.md    Windows Hello 部分的考证与实测记录
+install.ps1                 一键安装（滤镜 + 可选 Hello）
+uninstall.ps1               卸载
+verify.ps1                  只读状态核查
+bin\x86, bin\x64            KinectCam.dll / BaseClassesNET.dll / Microsoft.Kinect.dll
+tools\find-camera-holder.ps1 查是谁占用了摄像头 DLL（重启管理器实现）
+src\*.patch                 相对上游 KinectCamV2 的源码改动
+docs\installer-readme.md    安装脚本的详细说明
+docs\windows-hello.md       Windows Hello 部分的考证与实测记录
 ```
 
 ## 实测环境
@@ -110,6 +176,5 @@ docs\windows-hello.md    Windows Hello 部分的考证与实测记录
 
 - `bin\` 里的 DLL 编译自 [DavidObando/KinectCamV2](https://github.com/DavidObando/KinectCamV2)（MIT），
   原始代码出自 Piotr Sowa（codingbytodesign.net）。
-- 为适配本机环境，源码改了三处：`Microsoft.Kinect.dll` 的 HintPath 指向 `v2.0_1409`（原仓库指向不存在的
-  `v2.0-PublicPreview1407`）、目标框架 `v4.5` → `v4.8`、x64 配置补上 `AllowUnsafeBlocks`。
+- 源码改动见 [变更记录](#变更记录) 与 `src\` 下的补丁。
 - 本仓库的安装/卸载/核查脚本为新增内容，同样以 MIT 发布，见 [LICENSE](LICENSE)。

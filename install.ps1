@@ -62,9 +62,59 @@ function Resolve-HelloChoice {
     return 'No'
 }
 
-# 找出谁占用了某个文件（提权后连 SYSTEM 进程的模块也能枚举）
+# 找出谁占用了某个文件。
+# 先问重启管理器（rstrtmgr），它能查到"只拿着文件句柄"和带保护的进程；
+# 那个失败时再退回枚举模块。
+$rmSource = @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+public static class RmQuery {
+    [StructLayout(LayoutKind.Sequential)]
+    struct RM_UNIQUE_PROCESS { public int dwProcessId; public System.Runtime.InteropServices.ComTypes.FILETIME ProcessStartTime; }
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct RM_PROCESS_INFO {
+        public RM_UNIQUE_PROCESS Process;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string strAppName;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 64)] public string strServiceShortName;
+        public int ApplicationType; public uint AppStatus; public uint TSSessionId;
+        [MarshalAs(UnmanagedType.Bool)] public bool bRestartable;
+    }
+    [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
+    static extern int RmStartSession(out uint h, int flags, string key);
+    [DllImport("rstrtmgr.dll")] static extern int RmEndSession(uint h);
+    [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
+    static extern int RmRegisterResources(uint h, uint nFiles, string[] files, uint nApps, RM_UNIQUE_PROCESS[] apps, uint nSvc, string[] svc);
+    [DllImport("rstrtmgr.dll")]
+    static extern int RmGetList(uint h, out uint needed, ref uint count, [In, Out] RM_PROCESS_INFO[] arr, ref uint reason);
+    public static string[] Who(string path) {
+        uint s = 0;
+        if (RmStartSession(out s, 0, Guid.NewGuid().ToString()) != 0) return new string[0];
+        try {
+            if (RmRegisterResources(s, 1, new string[] { path }, 0, null, 0, null) != 0) return new string[0];
+            uint need = 0, cnt = 0, rsn = 0;
+            int rv = RmGetList(s, out need, ref cnt, null, ref rsn);
+            if (need == 0) return new string[0];
+            var arr = new RM_PROCESS_INFO[need]; cnt = need;
+            if (RmGetList(s, out need, ref cnt, arr, ref rsn) != 0) return new string[0];
+            var l = new List<string>();
+            for (int i = 0; i < cnt; i++)
+                l.Add(arr[i].strAppName.Trim() + " (PID " + arr[i].Process.dwProcessId + ")" +
+                      (arr[i].strServiceShortName != null && arr[i].strServiceShortName.Length > 0 ? " [服务 " + arr[i].strServiceShortName + "]" : ""));
+            return l.ToArray();
+        } finally { RmEndSession(s); }
+    }
+}
+'@
+
 function Get-FileHolder {
     param([string]$Path)
+    try {
+        if (-not ('RmQuery' -as [type])) { Add-Type -TypeDefinition $rmSource -ErrorAction Stop }
+        $found = [RmQuery]::Who($Path)
+        if ($found -and $found.Count -gt 0) { return $found }
+    }
+    catch { }
     $holders = @()
     foreach ($proc in Get-Process -ErrorAction SilentlyContinue) {
         try {
@@ -157,10 +207,18 @@ foreach ($arch in 'x86', 'x64') {
     }
     Write-Log "[$arch] 文件已就绪: $copied 个已复制 -> $target"
     if ($locked.Count -gt 0) {
-        Write-Log "[$arch] $($locked -join ', ') 正被占用，沿用目录里的已有文件（内容相同）"
+        Write-Log "[$arch] $($locked -join ', ') 正被占用，本次沿用目录里的旧文件"
+        $holders = @()
         foreach ($name in $locked) {
-            $who = Get-FileHolder (Join-Path $target $name)
-            if ($who.Count -gt 0) { Write-Log "[$arch]   占用者: $($who -join ', ')" }
+            $holders += Get-FileHolder (Join-Path $target $name)
+        }
+        $holders = $holders | Where-Object { $_ } | Select-Object -Unique
+        if ($holders.Count -gt 0) {
+            Write-Log "[$arch]   占用者: $($holders -join ', ')"
+            Write-Log "[$arch]   >> 关掉上面这些程序后再跑一次脚本，否则 $arch 还是旧版本"
+        }
+        else {
+            Write-Log "[$arch]   >> 查不到占用者，重启电脑后再跑一次脚本即可更新"
         }
     }
 

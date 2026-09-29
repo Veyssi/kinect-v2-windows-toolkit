@@ -1,0 +1,478 @@
+diff --git a/src/BaseClasses/BaseClasses.csproj b/src/BaseClasses/BaseClasses.csproj
+index 75cd23d..f99c581 100644
+--- a/src/BaseClasses/BaseClasses.csproj
++++ b/src/BaseClasses/BaseClasses.csproj
+@@ -10,7 +10,7 @@
+     <AppDesignerFolder>Properties</AppDesignerFolder>
+     <RootNamespace>DirectShow.BaseClasses</RootNamespace>
+     <AssemblyName>BaseClassesNET</AssemblyName>
+-    <TargetFrameworkVersion>v4.5</TargetFrameworkVersion>
++    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+     <FileAlignment>512</FileAlignment>
+     <StartupObject>
+     </StartupObject>
+@@ -147,4 +147,4 @@
+   <Target Name="AfterBuild">
+   </Target>
+   -->
+-</Project>
+\ No newline at end of file
++</Project>
+diff --git a/src/KinectCam/KinectCam.csproj b/src/KinectCam/KinectCam.csproj
+index b60e375..ceffc2e 100644
+--- a/src/KinectCam/KinectCam.csproj
++++ b/src/KinectCam/KinectCam.csproj
+@@ -10,7 +10,7 @@
+     <AppDesignerFolder>Properties</AppDesignerFolder>
+     <RootNamespace>KinectCam</RootNamespace>
+     <AssemblyName>KinectCam</AssemblyName>
+-    <TargetFrameworkVersion>v4.5</TargetFrameworkVersion>
++    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+     <FileAlignment>512</FileAlignment>
+     <StartupObject>
+     </StartupObject>
+@@ -79,6 +79,7 @@
+     <ErrorReport>prompt</ErrorReport>
+     <CodeAnalysisRuleSet>MinimumRecommendedRules.ruleset</CodeAnalysisRuleSet>
+     <Prefer32Bit>false</Prefer32Bit>
++    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">
+     <OutputPath>bin\x64\Release\</OutputPath>
+@@ -91,11 +92,12 @@
+     <ErrorReport>prompt</ErrorReport>
+     <CodeAnalysisRuleSet>MinimumRecommendedRules.ruleset</CodeAnalysisRuleSet>
+     <Prefer32Bit>false</Prefer32Bit>
++    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+   </PropertyGroup>
+   <ItemGroup>
+     <Reference Include="Microsoft.Kinect, Version=2.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35, processorArchitecture=MSIL">
+       <SpecificVersion>False</SpecificVersion>
+-      <HintPath>..\..\..\..\Program Files\Microsoft SDKs\Kinect\v2.0-PublicPreview1407\Assemblies\Microsoft.Kinect.dll</HintPath>
++      <HintPath>$(ProgramFiles)\Microsoft SDKs\Kinect\v2.0_1409\Assemblies\Microsoft.Kinect.dll</HintPath>
+       <Private>False</Private>
+     </Reference>
+     <Reference Include="System" />
+@@ -201,4 +203,4 @@
+   <Target Name="AfterBuild">
+   </Target>
+   -->
+-</Project>
+\ No newline at end of file
++</Project>
+diff --git a/src/KinectCam/KinectHelper.cs b/src/KinectCam/KinectHelper.cs
+index 8e469bf..beebe04 100644
+--- a/src/KinectCam/KinectHelper.cs
++++ b/src/KinectCam/KinectHelper.cs
+@@ -446,5 +446,135 @@ public unsafe static void GenerateFrame(IntPtr _ptr, int length, bool mirrored,
+ 					*pData++ = 0;
+ 			}
+ 		}
++
++		#region 多分辨率 / YUY2 输出
++
++		public enum FrameFormat
++		{
++			Rgb24,
++			Yuy2
++		}
++
++		// 完整一帧的临时缓冲（1920x1080 RGB24）
++		static readonly byte[] fullFrameBuffer = new byte[SensorWidth * SensorHeight * 3];
++		// 缩放后的临时缓冲，按需增长
++		static byte[] scaledFrameBuffer = new byte[0];
++
++		/// <summary>
++		/// 输出任意尺寸，RGB24 或 YUY2。
++		/// 先让 GenerateFrame 画一张完整的 1920x1080 RGB24，再缩放到目标尺寸；
++		/// 目标为 YUY2 时再做一次 4:2:2 色度抽样转换。
++		/// 原来只支持 1920x1080 及以上，导致要 640x480 / 1280x720 的程序连不上滤镜。
++		/// </summary>
++		public unsafe static void GenerateFrameEx(IntPtr _ptr, int _width, int _height, FrameFormat _format, bool mirrored, bool zoom)
++		{
++			if (_ptr == IntPtr.Zero || _width <= 0 || _height <= 0) return;
++
++			fixed (byte* _full = fullFrameBuffer)
++			{
++				GenerateFrame((IntPtr)_full, fullFrameBuffer.Length, mirrored, zoom);
++
++				int _scaledLength = _width * _height * 3;
++				if (scaledFrameBuffer.Length < _scaledLength) scaledFrameBuffer = new byte[_scaledLength];
++
++				fixed (byte* _scaled = scaledFrameBuffer)
++				{
++					ScaleRgb24(_full, SensorWidth, SensorHeight, _scaled, _width, _height);
++
++					if (_format == FrameFormat.Yuy2)
++					{
++						Rgb24ToYuy2(_scaled, _width, _height, (byte*)_ptr.ToPointer());
++					}
++					else
++					{
++						Buffer.MemoryCopy(_scaled, _ptr.ToPointer(), _scaledLength, _scaledLength);
++					}
++				}
++			}
++		}
++
++		/// <summary>
++		/// RGB24 面积平均缩放。内存序是 BGR（和 BI_RGB 一致），逐行处理所以不会改变上下方向。
++		/// </summary>
++		unsafe static void ScaleRgb24(byte* _src, int _srcWidth, int _srcHeight, byte* _dst, int _dstWidth, int _dstHeight)
++		{
++			for (int _y = 0; _y < _dstHeight; _y++)
++			{
++				int _sy0 = (int)((long)_y * _srcHeight / _dstHeight);
++				int _sy1 = (int)((long)(_y + 1) * _srcHeight / _dstHeight);
++				if (_sy1 <= _sy0) _sy1 = _sy0 + 1;
++				if (_sy1 > _srcHeight) _sy1 = _srcHeight;
++
++				for (int _x = 0; _x < _dstWidth; _x++)
++				{
++					int _sx0 = (int)((long)_x * _srcWidth / _dstWidth);
++					int _sx1 = (int)((long)(_x + 1) * _srcWidth / _dstWidth);
++					if (_sx1 <= _sx0) _sx1 = _sx0 + 1;
++					if (_sx1 > _srcWidth) _sx1 = _srcWidth;
++
++					int _b = 0, _g = 0, _r = 0, _n = 0;
++					for (int _sy = _sy0; _sy < _sy1; _sy++)
++					{
++						byte* _row = _src + (_sy * _srcWidth + _sx0) * 3;
++						for (int _sx = _sx0; _sx < _sx1; _sx++)
++						{
++							_b += _row[0];
++							_g += _row[1];
++							_r += _row[2];
++							_row += 3;
++							_n++;
++						}
++					}
++					*_dst++ = (byte)(_b / _n);
++					*_dst++ = (byte)(_g / _n);
++					*_dst++ = (byte)(_r / _n);
++				}
++			}
++		}
++
++		/// <summary>
++		/// RGB24 -> YUY2（4:2:2，字节序 Y0 U Y1 V）。
++		/// </summary>
++		unsafe static void Rgb24ToYuy2(byte* _src, int _width, int _height, byte* _dst)
++		{
++			for (int _y = 0; _y < _height; _y++)
++			{
++				byte* _row = _src + _y * _width * 3;
++				for (int _x = 0; _x < _width; _x += 2)
++				{
++					byte* _p0 = _row;
++					byte* _p1 = (_x + 1 < _width) ? _row + 3 : _row;
++
++					int _b0 = _p0[0], _g0 = _p0[1], _r0 = _p0[2];
++					int _b1 = _p1[0], _g1 = _p1[1], _r1 = _p1[2];
++
++					int _Y0 = (77 * _r0 + 150 * _g0 + 29 * _b0) >> 8;
++					int _Y1 = (77 * _r1 + 150 * _g1 + 29 * _b1) >> 8;
++					int _U = ((-43 * (_r0 + _r1) - 85 * (_g0 + _g1) + 128 * (_b0 + _b1)) >> 9) + 128;
++					int _V = ((128 * (_r0 + _r1) - 107 * (_g0 + _g1) - 21 * (_b0 + _b1)) >> 9) + 128;
++
++					*_dst++ = (byte)(_Y0 < 0 ? 0 : (_Y0 > 255 ? 255 : _Y0));
++					*_dst++ = (byte)(_U < 0 ? 0 : (_U > 255 ? 255 : _U));
++					*_dst++ = (byte)(_Y1 < 0 ? 0 : (_Y1 > 255 ? 255 : _Y1));
++					*_dst++ = (byte)(_V < 0 ? 0 : (_V > 255 ? 255 : _V));
++
++					_row += 6;
++				}
++			}
++		}
++
++		/// <summary>
++		/// 桌面捕获路径用：把一整块 RGB24 缓冲转成 YUY2 写进目标。
++		/// </summary>
++		public unsafe static void ConvertRgb24ToYuy2(byte[] _src, int _width, int _height, IntPtr _dst)
++		{
++			if (_src == null || _dst == IntPtr.Zero) return;
++			fixed (byte* _s = _src)
++			{
++				Rgb24ToYuy2(_s, _width, _height, (byte*)_dst.ToPointer());
++			}
++		}
++
++		#endregion
+ 	}
+ }
+diff --git a/src/KinectCam/VirtualCam.cs b/src/KinectCam/VirtualCam.cs
+index 5fff6d5..d8f0d92 100644
+--- a/src/KinectCam/VirtualCam.cs
++++ b/src/KinectCam/VirtualCam.cs
+@@ -592,16 +592,24 @@ public class VirtualCamFilter : BaseSourceFilter, IAMFilterMiscFlags
+         private const int c_iDefaultHeight = 1080;
+         private const int c_nDefaultBitCount = 24;
+         private const int c_iDefaultFPS = 30;
+-        private const int c_iFormatsCount = 8;
+-        private const int c_nGranularityW = 160;
+-        private const int c_nGranularityH = 120;
+-        private const int c_nMinWidth = 1920;
+-        private const int c_nMinHeight = 1080;
+-        private const int c_nMaxWidth = c_nMinWidth + c_nGranularityW * (c_iFormatsCount - 1);
+-        private const int c_nMaxHeight = c_nMinHeight + c_nGranularityH * (c_iFormatsCount - 1);
+-        private const int c_nMinFPS = 30;
++        // 原来最小只给 1920x1080，会议 / IM 软件要 640x480 或 1280x720 时连不上滤镜，
++        // 经常被它们报成"摄像头被占用"。这里放开到 320x240 ~ 3840x2160，内部缩放。
++        private const int c_nGranularityW = 16;
++        private const int c_nGranularityH = 16;
++        private const int c_nMinWidth = 320;
++        private const int c_nMinHeight = 240;
++        private const int c_nMaxWidth = 3840;
++        private const int c_nMaxHeight = 2160;
++        private const int c_nMinFPS = 5;
+         private const int c_nMaxFPS = 60;
+ 
++        // YUY2 的 FOURCC（'YUY2'）
++        private const int FOURCC_YUY2 = 0x32595559;
++
++        // 对外枚举的常用分辨率阶梯，覆盖绝大多数摄像头程序会挑的尺寸
++        static readonly int[] c_SupportedWidths  = {  320,  640,  800,  960, 1024, 1280, 1600, 1920, 2560, 3840 };
++        static readonly int[] c_SupportedHeights = {  240,  480,  600,  540,  768,  720,  900, 1080, 1440, 2160 };
++
+         #endregion
+ 
+         #region Variables
+@@ -609,12 +617,15 @@ public class VirtualCamFilter : BaseSourceFilter, IAMFilterMiscFlags
+         protected int m_nWidth = c_iDefaultWidth;
+         protected int m_nHeight = c_iDefaultHeight;
+         protected int m_nBitCount = c_nDefaultBitCount;
++        protected Guid m_guidSubType = MediaSubType.RGB24;
+         protected long m_nAvgTimePerFrame = UNITS / c_iDefaultFPS;
+ 
+         protected IntPtr m_hScreenDC = IntPtr.Zero;
+         protected IntPtr m_hMemDC = IntPtr.Zero;
+         protected IntPtr m_hBitmap = IntPtr.Zero;
+         protected BitmapInfo m_bmi = new BitmapInfo();
++        // 桌面捕获 + YUY2 输出时的 RGB 中转缓冲
++        private byte[] m_desktopRgbBuffer = null;
+ 
+         protected int m_nMaxWidth = 0;
+         protected int m_nMaxHeight = 0;
+@@ -686,32 +697,46 @@ public int CheckMediaType(AMMediaType pmt)
+             {
+                 return VFW_E_INVALIDMEDIATYPE;
+             }
+-            if (
+-                    pmt.subType != MediaSubType.RGB24
+-                &&  pmt.subType != MediaSubType.RGB32
+-                &&  pmt.subType != MediaSubType.ARGB32
+-                )
+-            {
+-                return VFW_E_INVALIDMEDIATYPE;
+-            }
+             BitmapInfoHeader _bmi = pmt;
+             if (_bmi == null)
+             {
+                 return E_UNEXPECTED;
+             }
+-            if (_bmi.Compression != BI_RGB)
++
++            bool _yuy2 = (pmt.subType == MediaSubType.YUY2) || (_bmi.Compression == FOURCC_YUY2);
++            bool _rgb = (pmt.subType == MediaSubType.RGB24
++                      || pmt.subType == MediaSubType.RGB32
++                      || pmt.subType == MediaSubType.ARGB32);
++
++            if (!_yuy2 && !_rgb)
++            {
++                return VFW_E_INVALIDMEDIATYPE;
++            }
++            if (_yuy2)
+             {
+-                return VFW_E_TYPE_NOT_ACCEPTED;
++                if (_bmi.BitCount != 16)
++                {
++                    return VFW_E_TYPE_NOT_ACCEPTED;
++                }
+             }
+-            if (_bmi.BitCount != 24 && _bmi.BitCount != 32)
++            else
+             {
+-                return VFW_E_TYPE_NOT_ACCEPTED;
++                if (_bmi.Compression != BI_RGB)
++                {
++                    return VFW_E_TYPE_NOT_ACCEPTED;
++                }
++                if (_bmi.BitCount != 24 && _bmi.BitCount != 32)
++                {
++                    return VFW_E_TYPE_NOT_ACCEPTED;
++                }
+             }
+             VideoStreamConfigCaps _caps;
+             GetDefaultCaps(0, out _caps);
+             if (
+                     _bmi.Width < _caps.MinOutputSize.Width
+                 || _bmi.Width > _caps.MaxOutputSize.Width
++                || Math.Abs(_bmi.Height) < _caps.MinOutputSize.Height
++                || Math.Abs(_bmi.Height) > _caps.MaxOutputSize.Height
+                 )
+             {
+                 return VFW_E_INVALIDMEDIATYPE;
+@@ -748,10 +773,12 @@ public int SetMediaType(AMMediaType pmt)
+                     m_hBitmap = IntPtr.Zero;
+                 }
+                 BitmapInfoHeader _bmi = pmt;
++                m_guidSubType = pmt.subType;
++                bool _yuy2Format = (_bmi.Compression == FOURCC_YUY2) || (pmt.subType == MediaSubType.YUY2);
+                 m_bmi.bmiHeader.BitCount = _bmi.BitCount;
+                 if (_bmi.Height != 0) m_bmi.bmiHeader.Height = _bmi.Height;
+                 if (_bmi.Width > 0) m_bmi.bmiHeader.Width = _bmi.Width;
+-                m_bmi.bmiHeader.Compression = BI_RGB;
++                m_bmi.bmiHeader.Compression = _yuy2Format ? FOURCC_YUY2 : BI_RGB;
+                 m_bmi.bmiHeader.Planes = 1;
+                 m_bmi.bmiHeader.ImageSize = ALIGN16(m_bmi.bmiHeader.Width) * ALIGN16(Math.Abs(m_bmi.bmiHeader.Height)) * m_bmi.bmiHeader.BitCount / 8;
+                 m_nWidth = _bmi.Width;
+@@ -779,53 +806,63 @@ public int SetMediaType(AMMediaType pmt)
+         public int GetMediaType(int iPosition, ref AMMediaType pMediaType)
+         {
+             if (iPosition < 0) return E_INVALIDARG;
+-            VideoStreamConfigCaps _caps;
+-            GetDefaultCaps(0, out _caps);
+ 
+-            int nWidth = 0;
+-            int nHeight = 0;
+-
+-            if (iPosition == 0)
++            // 每个分辨率两种像素格式：0 = RGB24，1 = YUY2。
++            // 只认 YUY2 的程序不少（国内会议 / IM 客户端尤其常见），两种都提供。
++            const int _formatsPerSize = 2;
++            int _total = c_SupportedWidths.Length * _formatsPerSize;
++            if (iPosition > _total)
+             {
+-                if (Pins.Count > 0 && Pins[0].CurrentMediaType.majorType == MediaType.Video)
+-                {
+-                    pMediaType.Set(Pins[0].CurrentMediaType);
+-                    return NOERROR;
+-                }
+-                nWidth = _caps.InputSize.Width;
+-                nHeight = _caps.InputSize.Height;
++                return VFW_S_NO_MORE_ITEMS;
+             }
+-            else
++
++            int _sizeIndex;
++            bool _yuy2;
++
++            // 索引 0 必须优先返回"调用方刚刚 SetFormat 的那个格式"：
++            // DirectShow 建立连接时就是靠它把应用请求的分辨率放进管脚协商里。
++            // 少了这一步，应用要 640x480 也会被按第一个格式（320x240）连上。
++            if (iPosition == 0 &&
++                Pins.Count > 0 &&
++                Pins[0].CurrentMediaType != null &&
++                Pins[0].CurrentMediaType.majorType == MediaType.Video &&
++                Pins[0].CurrentMediaType.formatPtr != IntPtr.Zero)
+             {
+-                iPosition--;
+-                nWidth = _caps.MinOutputSize.Width + _caps.OutputGranularityX * iPosition;
+-                nHeight = _caps.MinOutputSize.Height + _caps.OutputGranularityY * iPosition;
+-                if (nWidth > _caps.MaxOutputSize.Width || nHeight > _caps.MaxOutputSize.Height)
+-                {
+-                    return VFW_S_NO_MORE_ITEMS;
+-                }
++                pMediaType.Set(Pins[0].CurrentMediaType);
++                return NOERROR;
+             }
+ 
++            int _index = (iPosition == 0) ? 0 : iPosition - 1;
++            _sizeIndex = _index / _formatsPerSize;
++            _yuy2 = (_index % _formatsPerSize) == 1;
++
++            int nWidth = c_SupportedWidths[_sizeIndex];
++            int nHeight = c_SupportedHeights[_sizeIndex];
++
+             pMediaType.majorType = DirectShow.MediaType.Video;
+             pMediaType.formatType = DirectShow.FormatType.VideoInfo;
+ 
+             VideoInfoHeader vih = new VideoInfoHeader();
+             vih.AvgTimePerFrame = m_nAvgTimePerFrame;
+-            vih.BmiHeader.Compression = BI_RGB;
+-            vih.BmiHeader.BitCount = (short)m_nBitCount;
+             vih.BmiHeader.Width = nWidth;
+             vih.BmiHeader.Height = nHeight;
+             vih.BmiHeader.Planes = 1;
+-            vih.BmiHeader.ImageSize = vih.BmiHeader.Width * Math.Abs(vih.BmiHeader.Height) * vih.BmiHeader.BitCount / 8;
+ 
+-            if (vih.BmiHeader.BitCount == 32)
++            if (_yuy2)
+             {
+-                pMediaType.subType = DirectShow.MediaSubType.RGB32;
++                vih.BmiHeader.Compression = FOURCC_YUY2;
++                vih.BmiHeader.BitCount = 16;
++                pMediaType.subType = DirectShow.MediaSubType.YUY2;
+             }
+-            if (vih.BmiHeader.BitCount == 24)
++            else
+             {
++                vih.BmiHeader.Compression = BI_RGB;
++                vih.BmiHeader.BitCount = (short)c_nDefaultBitCount;
+                 pMediaType.subType = DirectShow.MediaSubType.RGB24;
+             }
++
++            vih.BmiHeader.ImageSize = vih.BmiHeader.Width * Math.Abs(vih.BmiHeader.Height) * vih.BmiHeader.BitCount / 8;
++
+             AMMediaType.SetFormat(ref pMediaType, ref vih);
+             pMediaType.fixedSizeSamples = true;
+             pMediaType.sampleSize = vih.BmiHeader.ImageSize;
+@@ -860,22 +897,53 @@ public unsafe int FillBuffer(ref IMediaSampleImpl _sample)
+         {
+             IntPtr _ptr;
+             _sample.GetPointer(out _ptr);
+-            int length = _sample.GetSize();
++            int _height = Math.Abs(m_nHeight);
++            bool _yuy2 = (m_guidSubType == MediaSubType.YUY2);
+ 
+             if (!KinectCamSettigns.Default.Desktop)
+             {
+-                KinectHelper.GenerateFrame(_ptr, length, KinectCamSettigns.Default.Mirrored,KinectCamSettigns.Default.Zoom);
++                // 相机路径：直接按协商好的尺寸和像素格式生成
++                KinectHelper.GenerateFrameEx(_ptr, m_nWidth, _height,
++                    _yuy2 ? KinectHelper.FrameFormat.Yuy2 : KinectHelper.FrameFormat.Rgb24,
++                    KinectCamSettigns.Default.Mirrored, KinectCamSettigns.Default.Zoom);
+             }
+             else
+             {
++                // 桌面路径：先抓到 RGB 位图，需要 YUY2 时再转换
+                 if (m_hBitmap == IntPtr.Zero)
+                 {
+-                    m_hBitmap = CreateCompatibleBitmap(m_hScreenDC, m_nWidth, Math.Abs(m_nHeight));
++                    m_hBitmap = CreateCompatibleBitmap(m_hScreenDC, m_nWidth, _height);
+                 }
+                 IntPtr hOldBitmap = SelectObject(m_hMemDC, m_hBitmap);
+-                StretchBlt(m_hMemDC, 0, 0, m_nWidth, Math.Abs(m_nHeight), m_hScreenDC, 0, 0, m_nMaxWidth, m_nMaxHeight, TernaryRasterOperations.SRCCOPY);
++                StretchBlt(m_hMemDC, 0, 0, m_nWidth, _height, m_hScreenDC, 0, 0, m_nMaxWidth, m_nMaxHeight, TernaryRasterOperations.SRCCOPY);
+                 SelectObject(m_hMemDC, hOldBitmap);
+-                GetDIBits(m_hMemDC, m_hBitmap, 0, (uint)Math.Abs(m_nHeight), _ptr, ref m_bmi, 0);
++
++                if (_yuy2)
++                {
++                    int _rgbLength = m_nWidth * _height * 3;
++                    if (m_desktopRgbBuffer == null || m_desktopRgbBuffer.Length < _rgbLength)
++                    {
++                        m_desktopRgbBuffer = new byte[_rgbLength];
++                    }
++
++                    BitmapInfo _bmiRgb = new BitmapInfo();
++                    _bmiRgb.bmiHeader.Width = m_nWidth;
++                    _bmiRgb.bmiHeader.Height = m_nHeight;
++                    _bmiRgb.bmiHeader.Planes = 1;
++                    _bmiRgb.bmiHeader.BitCount = 24;
++                    _bmiRgb.bmiHeader.Compression = BI_RGB;
++                    _bmiRgb.bmiHeader.ImageSize = _rgbLength;
++
++                    fixed (byte* _rgb = m_desktopRgbBuffer)
++                    {
++                        GetDIBits(m_hMemDC, m_hBitmap, 0, (uint)_height, (IntPtr)_rgb, ref _bmiRgb, 0);
++                    }
++                    KinectHelper.ConvertRgb24ToYuy2(m_desktopRgbBuffer, m_nWidth, _height, _ptr);
++                }
++                else
++                {
++                    GetDIBits(m_hMemDC, m_hBitmap, 0, (uint)_height, _ptr, ref m_bmi, 0);
++                }
+             }
+ 
+             _sample.SetActualDataLength(_sample.GetSize());
