@@ -60,11 +60,36 @@ index b60e375..ceffc2e 100644
 -</Project>
 \ No newline at end of file
 +</Project>
+diff --git a/src/KinectCam/KinectCamSettigns.cs b/src/KinectCam/KinectCamSettigns.cs
+index c3ff178..21f8a16 100644
+--- a/src/KinectCam/KinectCamSettigns.cs
++++ b/src/KinectCam/KinectCamSettigns.cs
+@@ -8,6 +8,20 @@ internal sealed class KinectCamSettigns
+ 
+         private static KinectCamSettigns defaultInstance = new KinectCamSettigns();
+ 
++        /// <summary>
++        /// 保持上游的默认：不镜像。
++        ///
++        /// 曾经试过默认镜像（想让滤镜和系统那条 Kinect V2 Video Sensor 的方向一致），
++        /// 但发现系统源本身就输出镜像画面，而绝大多数视频软件还会再镜像一次预览 ——
++        /// 滤镜若也默认镜像，就变成双重镜像（预览反而变正向、对方收到的是反的）。
++        ///
++        /// 所以这里遵循摄像头的通行做法：输出原始画面，镜像交给应用；
++        /// 个别需要镜像的程序，右键托盘图标的 "Mirrored" 单独开（按宿主进程记，互不影响）。
++        /// </summary>
++        private KinectCamSettigns()
++        {
++        }
++
+         public static KinectCamSettigns Default
+         {
+             get
 diff --git a/src/KinectCam/KinectHelper.cs b/src/KinectCam/KinectHelper.cs
-index 8e469bf..beebe04 100644
+index 8e469bf..7561f00 100644
 --- a/src/KinectCam/KinectHelper.cs
 +++ b/src/KinectCam/KinectHelper.cs
-@@ -446,5 +446,135 @@ public unsafe static void GenerateFrame(IntPtr _ptr, int length, bool mirrored,
+@@ -446,5 +446,204 @@ public unsafe static void GenerateFrame(IntPtr _ptr, int length, bool mirrored,
  					*pData++ = 0;
  			}
  		}
@@ -74,7 +99,9 @@ index 8e469bf..beebe04 100644
 +		public enum FrameFormat
 +		{
 +			Rgb24,
-+			Yuy2
++			Yuy2,
++			/// <summary>YUV 4:2:0，内存布局先 Y 平面再交织的 UV 平面。很多现代软件默认要这个。</summary>
++			Nv12
 +		}
 +
 +		// 完整一帧的临时缓冲（1920x1080 RGB24）
@@ -106,6 +133,10 @@ index 8e469bf..beebe04 100644
 +					if (_format == FrameFormat.Yuy2)
 +					{
 +						Rgb24ToYuy2(_scaled, _width, _height, (byte*)_ptr.ToPointer());
++					}
++					else if (_format == FrameFormat.Nv12)
++					{
++						Rgb24ToNv12(_scaled, _width, _height, (byte*)_ptr.ToPointer());
 +					}
 +					else
 +					{
@@ -197,14 +228,77 @@ index 8e469bf..beebe04 100644
 +			}
 +		}
 +
++		/// <summary>
++		/// RGB24 -> NV12（YUV 4:2:0）：先铺满 Y 平面，再铺交织的 UV 平面（每个 2x2 像素一个色度点）。
++		/// 宽高必须是偶数 —— 我们提供的分辨率阶梯全都是偶数。
++		/// </summary>
++		unsafe static void Rgb24ToNv12(byte* _src, int _width, int _height, byte* _dst)
++		{
++			byte* _yPlane = _dst;
++			byte* _uvPlane = _dst + _width * _height;
++
++			// Y 平面：逐像素
++			for (int _y = 0; _y < _height; _y++)
++			{
++				byte* _row = _src + _y * _width * 3;
++				byte* _yRow = _yPlane + _y * _width;
++				for (int _x = 0; _x < _width; _x++)
++				{
++					int _b = _row[0], _g = _row[1], _r = _row[2];
++					int _luma = (77 * _r + 150 * _g + 29 * _b) >> 8;
++					*_yRow++ = (byte)(_luma < 0 ? 0 : (_luma > 255 ? 255 : _luma));
++					_row += 3;
++				}
++			}
++
++			// UV 平面：每 2x2 像素取平均
++			int _uvWidth = _width / 2;
++			for (int _y = 0; _y + 1 < _height; _y += 2)
++			{
++				byte* _row0 = _src + _y * _width * 3;
++				byte* _row1 = _row0 + _width * 3;
++				byte* _uvRow = _uvPlane + (_y / 2) * _uvWidth * 2;
++				for (int _x = 0; _x + 1 < _width; _x += 2)
++				{
++					int _r = 0, _g = 0, _b = 0;
++					for (int _k = 0; _k < 2; _k++)
++					{
++						byte* _p = (_k == 0 ? _row0 : _row1) + _x * 3;
++						_b += _p[0]; _g += _p[1]; _r += _p[2];
++						_p += 3;
++						_b += _p[0]; _g += _p[1]; _r += _p[2];
++					}
++					_r >>= 2; _g >>= 2; _b >>= 2;
++
++					int _u = ((-43 * _r - 85 * _g + 128 * _b) >> 8) + 128;
++					int _v = ((128 * _r - 107 * _g - 21 * _b) >> 8) + 128;
++
++					*_uvRow++ = (byte)(_u < 0 ? 0 : (_u > 255 ? 255 : _u));
++					*_uvRow++ = (byte)(_v < 0 ? 0 : (_v > 255 ? 255 : _v));
++				}
++			}
++		}
++
++		/// <summary>
++		/// 桌面捕获路径用：把一整块 RGB24 缓冲转成 NV12 写进目标。
++		/// </summary>
++		public unsafe static void ConvertRgb24ToNv12(byte[] _src, int _width, int _height, IntPtr _dst)
++		{
++			if (_src == null || _dst == IntPtr.Zero) return;
++			fixed (byte* _s = _src)
++			{
++				Rgb24ToNv12(_s, _width, _height, (byte*)_dst.ToPointer());
++			}
++		}
++
 +		#endregion
  	}
  }
 diff --git a/src/KinectCam/VirtualCam.cs b/src/KinectCam/VirtualCam.cs
-index 5fff6d5..d8f0d92 100644
+index 5fff6d5..4b25ec3 100644
 --- a/src/KinectCam/VirtualCam.cs
 +++ b/src/KinectCam/VirtualCam.cs
-@@ -592,16 +592,24 @@ public class VirtualCamFilter : BaseSourceFilter, IAMFilterMiscFlags
+@@ -592,16 +592,27 @@ public class VirtualCamFilter : BaseSourceFilter, IAMFilterMiscFlags
          private const int c_iDefaultHeight = 1080;
          private const int c_nDefaultBitCount = 24;
          private const int c_iDefaultFPS = 30;
@@ -229,6 +323,9 @@ index 5fff6d5..d8f0d92 100644
  
 +        // YUY2 的 FOURCC（'YUY2'）
 +        private const int FOURCC_YUY2 = 0x32595559;
++        // NV12 的 FOURCC（'NV12'）—— 系统那条（Kinect V2 Video Sensor）也提供它，
++        // 现代采集/编码链（浏览器、部分会议软件、硬件编码）默认会优先要这个格式。
++        private const int FOURCC_NV12 = 0x3231564E;
 +
 +        // 对外枚举的常用分辨率阶梯，覆盖绝大多数摄像头程序会挑的尺寸
 +        static readonly int[] c_SupportedWidths  = {  320,  640,  800,  960, 1024, 1280, 1600, 1920, 2560, 3840 };
@@ -237,7 +334,7 @@ index 5fff6d5..d8f0d92 100644
          #endregion
  
          #region Variables
-@@ -609,12 +617,15 @@ public class VirtualCamFilter : BaseSourceFilter, IAMFilterMiscFlags
+@@ -609,12 +620,15 @@ public class VirtualCamFilter : BaseSourceFilter, IAMFilterMiscFlags
          protected int m_nWidth = c_iDefaultWidth;
          protected int m_nHeight = c_iDefaultHeight;
          protected int m_nBitCount = c_nDefaultBitCount;
@@ -253,7 +350,7 @@ index 5fff6d5..d8f0d92 100644
  
          protected int m_nMaxWidth = 0;
          protected int m_nMaxHeight = 0;
-@@ -686,32 +697,46 @@ public int CheckMediaType(AMMediaType pmt)
+@@ -686,32 +700,52 @@ public int CheckMediaType(AMMediaType pmt)
              {
                  return VFW_E_INVALIDMEDIATYPE;
              }
@@ -273,26 +370,32 @@ index 5fff6d5..d8f0d92 100644
 -            if (_bmi.Compression != BI_RGB)
 +
 +            bool _yuy2 = (pmt.subType == MediaSubType.YUY2) || (_bmi.Compression == FOURCC_YUY2);
++            bool _nv12 = (pmt.subType == MediaSubType.NV12) || (_bmi.Compression == FOURCC_NV12);
 +            bool _rgb = (pmt.subType == MediaSubType.RGB24
 +                      || pmt.subType == MediaSubType.RGB32
 +                      || pmt.subType == MediaSubType.ARGB32);
 +
-+            if (!_yuy2 && !_rgb)
-+            {
-+                return VFW_E_INVALIDMEDIATYPE;
-+            }
-+            if (_yuy2)
++            if (!_yuy2 && !_nv12 && !_rgb)
              {
 -                return VFW_E_TYPE_NOT_ACCEPTED;
-+                if (_bmi.BitCount != 16)
++                return VFW_E_INVALIDMEDIATYPE;
+             }
+-            if (_bmi.BitCount != 24 && _bmi.BitCount != 32)
++            if (_yuy2 || _nv12)
+             {
+-                return VFW_E_TYPE_NOT_ACCEPTED;
++                // YUY2 是 16bpp；NV12 标准写 12bpp，但有些软件会写 16，这里都放行
++                if (_yuy2 && _bmi.BitCount != 16)
 +                {
 +                    return VFW_E_TYPE_NOT_ACCEPTED;
 +                }
-             }
--            if (_bmi.BitCount != 24 && _bmi.BitCount != 32)
++                if (_nv12 && _bmi.BitCount != 12 && _bmi.BitCount != 16)
++                {
++                    return VFW_E_TYPE_NOT_ACCEPTED;
++                }
++            }
 +            else
-             {
--                return VFW_E_TYPE_NOT_ACCEPTED;
++            {
 +                if (_bmi.Compression != BI_RGB)
 +                {
 +                    return VFW_E_TYPE_NOT_ACCEPTED;
@@ -312,34 +415,37 @@ index 5fff6d5..d8f0d92 100644
                  )
              {
                  return VFW_E_INVALIDMEDIATYPE;
-@@ -748,10 +773,12 @@ public int SetMediaType(AMMediaType pmt)
+@@ -748,10 +782,13 @@ public int SetMediaType(AMMediaType pmt)
                      m_hBitmap = IntPtr.Zero;
                  }
                  BitmapInfoHeader _bmi = pmt;
 +                m_guidSubType = pmt.subType;
 +                bool _yuy2Format = (_bmi.Compression == FOURCC_YUY2) || (pmt.subType == MediaSubType.YUY2);
++                bool _nv12Format = (_bmi.Compression == FOURCC_NV12) || (pmt.subType == MediaSubType.NV12);
                  m_bmi.bmiHeader.BitCount = _bmi.BitCount;
                  if (_bmi.Height != 0) m_bmi.bmiHeader.Height = _bmi.Height;
                  if (_bmi.Width > 0) m_bmi.bmiHeader.Width = _bmi.Width;
 -                m_bmi.bmiHeader.Compression = BI_RGB;
-+                m_bmi.bmiHeader.Compression = _yuy2Format ? FOURCC_YUY2 : BI_RGB;
++                m_bmi.bmiHeader.Compression = _yuy2Format ? FOURCC_YUY2 : (_nv12Format ? FOURCC_NV12 : BI_RGB);
                  m_bmi.bmiHeader.Planes = 1;
                  m_bmi.bmiHeader.ImageSize = ALIGN16(m_bmi.bmiHeader.Width) * ALIGN16(Math.Abs(m_bmi.bmiHeader.Height)) * m_bmi.bmiHeader.BitCount / 8;
                  m_nWidth = _bmi.Width;
-@@ -779,53 +806,63 @@ public int SetMediaType(AMMediaType pmt)
+@@ -779,53 +816,71 @@ public int SetMediaType(AMMediaType pmt)
          public int GetMediaType(int iPosition, ref AMMediaType pMediaType)
          {
              if (iPosition < 0) return E_INVALIDARG;
 -            VideoStreamConfigCaps _caps;
 -            GetDefaultCaps(0, out _caps);
- 
+-
 -            int nWidth = 0;
 -            int nHeight = 0;
--
+ 
 -            if (iPosition == 0)
-+            // 每个分辨率两种像素格式：0 = RGB24，1 = YUY2。
-+            // 只认 YUY2 的程序不少（国内会议 / IM 客户端尤其常见），两种都提供。
-+            const int _formatsPerSize = 2;
++            // 每个分辨率三种像素格式：0 = RGB24，1 = YUY2，2 = NV12。
++            // RGB24 是万金油；国内会议 / IM 客户端常只认 YUY2；
++            // 现代采集 / 编码链（浏览器、硬件编码）默认要 NV12 —— 系统那条摄像头源
++            // （Kinect V2 Video Sensor）也只给 YUY2/NV12，所以这三个都提供。
++            const int _formatsPerSize = 3;
 +            int _total = c_SupportedWidths.Length * _formatsPerSize;
 +            if (iPosition > _total)
              {
@@ -355,7 +461,7 @@ index 5fff6d5..d8f0d92 100644
 -            else
 +
 +            int _sizeIndex;
-+            bool _yuy2;
++            int _formatIndex;
 +
 +            // 索引 0 必须优先返回"调用方刚刚 SetFormat 的那个格式"：
 +            // DirectShow 建立连接时就是靠它把应用请求的分辨率放进管脚协商里。
@@ -379,7 +485,7 @@ index 5fff6d5..d8f0d92 100644
  
 +            int _index = (iPosition == 0) ? 0 : iPosition - 1;
 +            _sizeIndex = _index / _formatsPerSize;
-+            _yuy2 = (_index % _formatsPerSize) == 1;
++            _formatIndex = _index % _formatsPerSize;
 +
 +            int nWidth = c_SupportedWidths[_sizeIndex];
 +            int nHeight = c_SupportedHeights[_sizeIndex];
@@ -397,12 +503,18 @@ index 5fff6d5..d8f0d92 100644
 -            vih.BmiHeader.ImageSize = vih.BmiHeader.Width * Math.Abs(vih.BmiHeader.Height) * vih.BmiHeader.BitCount / 8;
  
 -            if (vih.BmiHeader.BitCount == 32)
-+            if (_yuy2)
-             {
--                pMediaType.subType = DirectShow.MediaSubType.RGB32;
++            if (_formatIndex == 1)
++            {
 +                vih.BmiHeader.Compression = FOURCC_YUY2;
 +                vih.BmiHeader.BitCount = 16;
 +                pMediaType.subType = DirectShow.MediaSubType.YUY2;
++            }
++            else if (_formatIndex == 2)
+             {
+-                pMediaType.subType = DirectShow.MediaSubType.RGB32;
++                vih.BmiHeader.Compression = FOURCC_NV12;
++                vih.BmiHeader.BitCount = 12;
++                pMediaType.subType = DirectShow.MediaSubType.NV12;
              }
 -            if (vih.BmiHeader.BitCount == 24)
 +            else
@@ -417,25 +529,29 @@ index 5fff6d5..d8f0d92 100644
              AMMediaType.SetFormat(ref pMediaType, ref vih);
              pMediaType.fixedSizeSamples = true;
              pMediaType.sampleSize = vih.BmiHeader.ImageSize;
-@@ -860,22 +897,53 @@ public unsafe int FillBuffer(ref IMediaSampleImpl _sample)
+@@ -860,22 +915,64 @@ public unsafe int FillBuffer(ref IMediaSampleImpl _sample)
          {
              IntPtr _ptr;
              _sample.GetPointer(out _ptr);
 -            int length = _sample.GetSize();
 +            int _height = Math.Abs(m_nHeight);
 +            bool _yuy2 = (m_guidSubType == MediaSubType.YUY2);
++            bool _nv12 = (m_guidSubType == MediaSubType.NV12);
++            KinectHelper.FrameFormat _format =
++                _yuy2 ? KinectHelper.FrameFormat.Yuy2 :
++                (_nv12 ? KinectHelper.FrameFormat.Nv12 : KinectHelper.FrameFormat.Rgb24);
  
              if (!KinectCamSettigns.Default.Desktop)
              {
 -                KinectHelper.GenerateFrame(_ptr, length, KinectCamSettigns.Default.Mirrored,KinectCamSettigns.Default.Zoom);
 +                // 相机路径：直接按协商好的尺寸和像素格式生成
 +                KinectHelper.GenerateFrameEx(_ptr, m_nWidth, _height,
-+                    _yuy2 ? KinectHelper.FrameFormat.Yuy2 : KinectHelper.FrameFormat.Rgb24,
++                    _format,
 +                    KinectCamSettigns.Default.Mirrored, KinectCamSettigns.Default.Zoom);
              }
              else
              {
-+                // 桌面路径：先抓到 RGB 位图，需要 YUY2 时再转换
++                // 桌面路径：先抓到 RGB 位图，需要 YUY2 / NV12 时再转换
                  if (m_hBitmap == IntPtr.Zero)
                  {
 -                    m_hBitmap = CreateCompatibleBitmap(m_hScreenDC, m_nWidth, Math.Abs(m_nHeight));
@@ -447,7 +563,7 @@ index 5fff6d5..d8f0d92 100644
                  SelectObject(m_hMemDC, hOldBitmap);
 -                GetDIBits(m_hMemDC, m_hBitmap, 0, (uint)Math.Abs(m_nHeight), _ptr, ref m_bmi, 0);
 +
-+                if (_yuy2)
++                if (_yuy2 || _nv12)
 +                {
 +                    int _rgbLength = m_nWidth * _height * 3;
 +                    if (m_desktopRgbBuffer == null || m_desktopRgbBuffer.Length < _rgbLength)
@@ -467,7 +583,14 @@ index 5fff6d5..d8f0d92 100644
 +                    {
 +                        GetDIBits(m_hMemDC, m_hBitmap, 0, (uint)_height, (IntPtr)_rgb, ref _bmiRgb, 0);
 +                    }
-+                    KinectHelper.ConvertRgb24ToYuy2(m_desktopRgbBuffer, m_nWidth, _height, _ptr);
++                    if (_yuy2)
++                    {
++                        KinectHelper.ConvertRgb24ToYuy2(m_desktopRgbBuffer, m_nWidth, _height, _ptr);
++                    }
++                    else
++                    {
++                        KinectHelper.ConvertRgb24ToNv12(m_desktopRgbBuffer, m_nWidth, _height, _ptr);
++                    }
 +                }
 +                else
 +                {

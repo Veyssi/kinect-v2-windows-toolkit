@@ -114,6 +114,7 @@ powershell -ExecutionPolicy Bypass -File .\tools\find-camera-holder.ps1
 | 640×480 RGB24 | ❌ | ✅ |
 | 1280×720 RGB24 | ❌ | ✅ |
 | 640×480 YUY2 | ❌ | ✅ |
+| NV12（现代采集 / 编码链默认） | ❌ | ✅ |
 | 1920×1080 RGB24 | ✅ | ✅ |
 
 自己确认设备到底提供什么格式，可以用 ffmpeg 列一下：
@@ -122,13 +123,50 @@ powershell -ExecutionPolicy Bypass -File .\tools\find-camera-holder.ps1
 ffmpeg -f dshow -list_options true -i "video=Kinect Camera V2"
 ```
 
+### 也许你根本不需要这个滤镜
+
+装上 Kinect 的 **Media Foundation 驱动**之后（`install.ps1 -WindowsHello Yes` 会装），系统里会多出一个
+摄像头设备 **`Kinect V2 Video Sensor`**。实测它**同时出现在 DirectShow 和 Media Foundation 两个世界里**：
+相机 App、Teams、浏览器、Windows Hello、ffmpeg 都能直接用它，**不需要这个滤镜**。
+
+所以本仓库的滤镜更像**备用件**，它的价值只在两处：
+
+1. **格式 / 分辨率更全**。系统源只提供 `YUY2 1920×1080`、`YUY2/NV12 512×424`；
+   滤镜提供 10 档分辨率（320×240 ～ 3840×2160）× 3 种像素格式（RGB24 / YUY2 / NV12）。
+   张口就要 640×480 或 RGB24 的程序，系统源喂不了，滤镜可以。
+2. **能翻转**。右键滤镜的托盘图标可切镜像（按宿主进程记，互不影响）。
+   系统源的画面是**固定镜像**的，没有开关 —— 也正因如此，滤镜**默认不镜像**，避免和应用自己的
+   预览镜像叠加成双重镜像。
+
+用哪个先看你的程序：**在系统源上跑得动就用系统源**，少一个虚拟摄像头；跑不动（挑格式/分辨率）
+再上滤镜。
+
 ### 滤镜装不上 / x64 更新不了
 
 被程序加载过的 DLL 无法覆盖。安装脚本会查出占用者并提示，关掉对应程序后重跑即可。
 
 ## 变更记录
 
-### v2：修复分辨率与像素格式（当前 `bin\` 里的版本）
+### v2.1：补 NV12、明确镜像默认（当前 `bin\` 里的版本）
+
+- **新增 NV12 输出**。系统源提供 `YUY2/NV12`，而现代采集 / 编码链（浏览器、硬件编码）默认要 NV12
+  —— 这是系统源唯一比滤镜强的格式，补上之后滤镜在像素格式上全面覆盖。
+- **镜像默认保持关闭**（上游行为）。开发中一度改成默认镜像，想让滤镜和系统源方向一致；但发现
+  系统源本身就是镜像输出，而绝大多数视频软件还会再镜像一次预览 —— 滤镜若也默认镜像就成了
+  双重镜像（预览反而变正向、发给对方的是反的）。所以坚持"摄像头输出原始画面、镜像交给应用"
+  的通行做法，需要翻转的个例用托盘图标里的 Mirrored。
+- 实测：RGB24 / YUY2 / NV12 三种格式都能出真画面；默认方向与系统源呈镜像关系，即滤镜输出的是
+  原始画面。
+
+补丁：[src/kinectcamv2.patch](src/kinectcamv2.patch)（应用时要带 `--ignore-whitespace`，上游是 CRLF）
+
+```powershell
+git clone https://github.com/DavidObando/KinectCamV2.git
+cd KinectCamV2
+git apply --ignore-whitespace ..\kinectcamv2.patch
+```
+
+### v2：分辨率阶梯 + YUY2
 
 上游原版只支持 1920×1080 及以上的 RGB24，这是"三方软件连不上/报被占用"的主因。本版在原版基础上补了：
 
@@ -139,15 +177,6 @@ ffmpeg -f dshow -list_options true -i "video=Kinect Camera V2"
 - 保留了上游「`GetMediaType(0)` 返回当前已设置格式」的协商逻辑 —— 少了它，应用请求 640×480 也会被按
   列表第一项连上（开发时踩过这个坑，已修正）。
 
-改动以补丁形式提供：[src/kinectcamv2-multires-yuy2.patch](src/kinectcamv2-multires-yuy2.patch)
-
-```powershell
-git clone https://github.com/DavidObando/KinectCamV2.git
-cd KinectCamV2
-git apply ..\kinectcamv2-multires-yuy2.patch
-# 再用 Visual Studio / MSBuild 编译（见下方致谢里的三处工程改动）
-```
-
 ### v1：让原版能在本机编译
 
 `Microsoft.Kinect.dll` 的 HintPath 指向 `v2.0_1409`、目标框架 `v4.5` → `v4.8`、
@@ -156,14 +185,13 @@ x64 配置补 `AllowUnsafeBlocks`（这三处也包含在上面的补丁里）�
 ## 目录
 
 ```
-install.ps1                 一键安装（滤镜 + 可选 Hello）
-uninstall.ps1               卸载
-verify.ps1                  只读状态核查
-bin\x86, bin\x64            KinectCam.dll / BaseClassesNET.dll / Microsoft.Kinect.dll
+install.ps1                  一键安装（滤镜 + 可选 Hello）
+uninstall.ps1                卸载
+verify.ps1                   只读状态核查
+bin\x86, bin\x64             KinectCam.dll / BaseClassesNET.dll / Microsoft.Kinect.dll
 tools\find-camera-holder.ps1 查是谁占用了摄像头 DLL（重启管理器实现）
-src\*.patch                 相对上游 KinectCamV2 的源码改动
-docs\installer-readme.md    安装脚本的详细说明
-docs\windows-hello.md       Windows Hello 部分的考证与实测记录
+src\kinectcamv2.patch        相对上游 KinectCamV2 的全部源码改动
+docs\windows-hello.md        Windows Hello 部分的考证与实测记录
 ```
 
 ## 实测环境
