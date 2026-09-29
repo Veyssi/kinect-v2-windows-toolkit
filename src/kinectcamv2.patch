@@ -60,11 +60,342 @@ index b60e375..ceffc2e 100644
 -</Project>
 \ No newline at end of file
 +</Project>
+diff --git a/src/KinectCam/KinectCamSettigns.cs b/src/KinectCam/KinectCamSettigns.cs
+index c3ff178..19bd34c 100644
+--- a/src/KinectCam/KinectCamSettigns.cs
++++ b/src/KinectCam/KinectCamSettigns.cs
+@@ -1,41 +1,121 @@
+-﻿namespace KinectCam
++namespace KinectCam
+ {
+     using System;
+-    using System.Collections.Generic;
++    using Microsoft.Win32;
+ 
++    /// <summary>
++    /// 滤镜的运行选项。
++    ///
++    /// 上游原版把这四个开关存在内存里，宿主程序一重启就全部复位，也没有外部程序能改。
++    /// 现在统一放在 HKCU\Software\KinectCamV2（DWORD，0/1），由独立进程的
++    /// KinectCamTray.exe 读写，滤镜这边带 300ms 缓存地轮询 —— 托盘里一改，
++    /// 下一个画面就生效，而且永久保存。
++    /// </summary>
+     internal sealed class KinectCamSettigns
+     {
++        public const string RegistryPath = @"Software\KinectCamV2";
++        public const string ValueMirrored = "Mirrored";
++        public const string ValueZoom = "Zoom";
++        public const string ValueTrackHead = "TrackHead";
++        public const string ValueDesktop = "Desktop";
+ 
+-        private static KinectCamSettigns defaultInstance = new KinectCamSettigns();
++        // 别每帧都读注册表，300ms 一次足够跟手
++        private const long CacheMilliseconds = 300;
++
++        private static readonly KinectCamSettigns defaultInstance = new KinectCamSettigns();
+ 
+         public static KinectCamSettigns Default
+         {
+-            get
++            get { return defaultInstance; }
++        }
++
++        private bool m_mirrored;
++        private bool m_zoom;
++        private bool m_trackHead;
++        private bool m_desktop;
++        private long m_cacheStamp;
++
++        private KinectCamSettigns()
++        {
++            // 构造函数里强刷一次，避免第一次取值拿到默认值
++            m_cacheStamp = 0;
++            Refresh(true);
++        }
++
++        private void Refresh(bool _force)
++        {
++            long _now = Environment.TickCount;
++            if (!_force && unchecked(_now - m_cacheStamp) < CacheMilliseconds) return;
++            m_cacheStamp = _now;
++
++            try
++            {
++                using (RegistryKey _key = Registry.CurrentUser.OpenSubKey(RegistryPath))
++                {
++                    m_mirrored = ReadBool(_key, ValueMirrored);
++                    m_zoom = ReadBool(_key, ValueZoom);
++                    m_trackHead = ReadBool(_key, ValueTrackHead);
++                    m_desktop = ReadBool(_key, ValueDesktop);
++                }
++            }
++            catch
++            {
++                // 读不到就按全关处理，不影响出画面
++            }
++        }
++
++        private static bool ReadBool(RegistryKey _key, string _name)
++        {
++            if (_key == null) return false;
++            object _value = _key.GetValue(_name);
++            if (_value == null) return false;
++            try
++            {
++                return Convert.ToInt32(_value) != 0;
++            }
++            catch
++            {
++                return false;
++            }
++        }
++
++        private void WriteBool(string _name, bool _value)
++        {
++            try
++            {
++                using (RegistryKey _key = Registry.CurrentUser.CreateSubKey(RegistryPath))
++                {
++                    if (_key != null) _key.SetValue(_name, _value ? 1 : 0, RegistryValueKind.DWord);
++                }
++            }
++            catch
+             {
+-                return defaultInstance;
+             }
++            m_cacheStamp = 0;
+         }
+ 
+         public bool Mirrored
+         {
+-            get;
+-			set;
+-		}
+-
+-		public bool Zoom
+-		{
+-			get;
+-			set;
+-		}
+-		public bool TrackHead
+-		{
+-			get;
+-			set;
+-		}
+-		public bool Desktop
+-        {
+-            get;
+-            set;
++            get { Refresh(false); return m_mirrored; }
++            set { WriteBool(ValueMirrored, value); m_mirrored = value; }
++        }
++
++        public bool Zoom
++        {
++            get { Refresh(false); return m_zoom; }
++            set { WriteBool(ValueZoom, value); m_zoom = value; }
++        }
++
++        public bool TrackHead
++        {
++            get { Refresh(false); return m_trackHead; }
++            set { WriteBool(ValueTrackHead, value); m_trackHead = value; }
++        }
++
++        public bool Desktop
++        {
++            get { Refresh(false); return m_desktop; }
++            set { WriteBool(ValueDesktop, value); m_desktop = value; }
+         }
+     }
+ }
 diff --git a/src/KinectCam/KinectHelper.cs b/src/KinectCam/KinectHelper.cs
-index 8e469bf..beebe04 100644
+index 8e469bf..fb8b44c 100644
 --- a/src/KinectCam/KinectHelper.cs
 +++ b/src/KinectCam/KinectHelper.cs
-@@ -446,5 +446,135 @@ public unsafe static void GenerateFrame(IntPtr _ptr, int length, bool mirrored,
+@@ -1,4 +1,4 @@
+-﻿using System;
++using System;
+ using System.Diagnostics;
+ using Microsoft.Kinect;
+ using System.Threading;
+@@ -10,128 +10,6 @@ namespace KinectCam
+ {
+ 	public static class KinectHelper
+ 	{
+-		class KinectCamApplicationContext : ApplicationContext
+-		{
+-			private NotifyIcon TrayIcon;
+-			private ContextMenuStrip TrayIconContextMenu;
+-			private ToolStripMenuItem MirroredMenuItem;
+-			private ToolStripMenuItem DesktopMenuItem;
+-			private ToolStripMenuItem ZoomMenuItem;
+-			private ToolStripMenuItem TrackHeadMenuItem;
+-			public KinectCamApplicationContext()
+-			{
+-				Application.ApplicationExit += new EventHandler(this.OnApplicationExit);
+-				InitializeComponent();
+-				TrayIcon.Visible = true;
+-				//TrayIcon.ShowBalloonTip(30000);
+-			}
+-
+-			private void InitializeComponent()
+-			{
+-				TrayIcon = new NotifyIcon();
+-
+-				TrayIcon.BalloonTipIcon = ToolTipIcon.Info;
+-				TrayIcon.BalloonTipText =
+-				  "For options use this tray icon.";
+-				TrayIcon.BalloonTipTitle = "KinectCamV2";
+-				TrayIcon.Text = "KinectCam";
+-
+-				TrayIcon.Icon = IconExtractor.Extract(117, false);
+-
+-				TrayIcon.DoubleClick += TrayIcon_DoubleClick;
+-
+-				TrayIconContextMenu = new ContextMenuStrip();
+-				MirroredMenuItem = new ToolStripMenuItem();
+-				DesktopMenuItem = new ToolStripMenuItem();
+-				ZoomMenuItem = new ToolStripMenuItem();
+-				TrackHeadMenuItem = new ToolStripMenuItem();
+-				TrayIconContextMenu.SuspendLayout();
+-
+-				// 
+-				// TrayIconContextMenu
+-				// 
+-				this.TrayIconContextMenu.Items.AddRange(new ToolStripItem[] {
+-				this.MirroredMenuItem,
+-				this.DesktopMenuItem,
+-				this.ZoomMenuItem,
+-				this.TrackHeadMenuItem
+-				});
+-				this.TrayIconContextMenu.Name = "TrayIconContextMenu";
+-				this.TrayIconContextMenu.Size = new Size(153, 70);
+-				// 
+-				// MirroredMenuItem
+-				// 
+-				this.MirroredMenuItem.Name = "Mirrored";
+-				this.MirroredMenuItem.Size = new Size(152, 22);
+-				this.MirroredMenuItem.Text = "Mirrored";
+-				this.MirroredMenuItem.Click += new EventHandler(this.MirroredMenuItem_Click);
+-
+-				// 
+-				// DesktopMenuItem
+-				// 
+-				this.DesktopMenuItem.Name = "Desktop";
+-				this.DesktopMenuItem.Size = new Size(152, 22);
+-				this.DesktopMenuItem.Text = "Desktop";
+-				this.DesktopMenuItem.Click += new EventHandler(this.DesktopMenuItem_Click);
+-
+-				// 
+-				// ZoomMenuItem
+-				// 
+-				this.ZoomMenuItem.Name = "Zoom";
+-				this.ZoomMenuItem.Size = new Size(152, 22);
+-				this.ZoomMenuItem.Text = "Zoom";
+-				this.ZoomMenuItem.Click += new EventHandler(this.ZoomMenuItem_Click);
+-
+-				// 
+-				// ZoomMenuItem
+-				//
+-				this.TrackHeadMenuItem.Name = "TrackHead";
+-				this.TrackHeadMenuItem.Size = new Size(152, 22);
+-				this.TrackHeadMenuItem.Text = "TrackHead";
+-				this.TrackHeadMenuItem.Click += new EventHandler(this.TrackHeadMenuItem_Click);
+-
+-				TrayIconContextMenu.ResumeLayout(false);
+-				TrayIcon.ContextMenuStrip = TrayIconContextMenu;
+-			}
+-
+-			private void OnApplicationExit(object sender, EventArgs e)
+-			{
+-				TrayIcon.Visible = false;
+-			}
+-
+-			private void TrayIcon_DoubleClick(object sender, EventArgs e)
+-			{
+-				TrayIcon.ShowBalloonTip(30000);
+-			}
+-
+-			private void MirroredMenuItem_Click(object sender, EventArgs e)
+-			{
+-				KinectCamSettigns.Default.Mirrored = !KinectCamSettigns.Default.Mirrored;
+-			}
+-
+-			private void DesktopMenuItem_Click(object sender, EventArgs e)
+-			{
+-				KinectCamSettigns.Default.Desktop = !KinectCamSettigns.Default.Desktop;
+-			}
+-
+-			private void ZoomMenuItem_Click(object sender, EventArgs e)
+-			{
+-				KinectCamSettigns.Default.Zoom = !KinectCamSettigns.Default.Zoom;
+-			}
+-
+-			private void TrackHeadMenuItem_Click(object sender, EventArgs e)
+-			{
+-				KinectCamSettigns.Default.TrackHead = !KinectCamSettigns.Default.TrackHead;
+-			}
+-			public void Exit()
+-			{
+-				TrayIcon.Visible = false;
+-			}
+-		}
+-
+-		static KinectCamApplicationContext context;
+-		static Thread contexThread;
+-		static Thread refreshThread;
+ 		static KinectSensor Sensor;
+ 
+ 		static void InitializeSensor()
+@@ -149,29 +27,6 @@ static void InitializeSensor()
+ 				sensor.Open();
+ 
+ 				Sensor = sensor;
+-
+-				if (context == null)
+-				{
+-					contexThread = new Thread(() =>
+-					{
+-						context = new KinectCamApplicationContext();
+-						Application.Run(context);
+-					});
+-					refreshThread = new Thread(() =>
+-					{
+-						while (true)
+-						{
+-							Thread.Sleep(250);
+-							Application.DoEvents();
+-						}
+-					});
+-					contexThread.IsBackground = true;
+-					refreshThread.IsBackground = true;
+-					contexThread.SetApartmentState(ApartmentState.STA);
+-					refreshThread.SetApartmentState(ApartmentState.STA);
+-					contexThread.Start();
+-					refreshThread.Start();
+-				}
+ 			}
+ 			catch
+ 			{
+@@ -287,16 +142,6 @@ public static void DisposeSensor()
+ 					sensor = null;
+ 					Sensor = null;
+ 				}
+-
+-				if (context != null)
+-				{
+-					context.Exit();
+-					context.Dispose();
+-					context = null;
+-
+-					contexThread.Abort();
+-					refreshThread.Abort();
+-				}
+ 			}
+ 			catch
+ 			{
+@@ -446,5 +291,135 @@ public unsafe static void GenerateFrame(IntPtr _ptr, int length, bool mirrored,
  					*pData++ = 0;
  			}
  		}
