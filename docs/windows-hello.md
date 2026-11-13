@@ -1,5 +1,7 @@
 # Kinect v2 做 Windows Hello 人脸登录 —— 资料 + 本机核查
 
+English version: [windows-hello.en.md](windows-hello.en.md)
+
 > **提示**：启用 Windows Hello 这一步现在已经并进一键安装脚本
 > [`../KinectCamV2-install/install.ps1`](../KinectCamV2-install/install.ps1)
 > （`-WindowsHello Yes`，或运行时交互选择）。本目录的 `install-kinect-driver.ps1`

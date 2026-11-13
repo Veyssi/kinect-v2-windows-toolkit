@@ -1,5 +1,7 @@
 # Kinect v2 Windows Toolkit
 
+English version: [README.en.md](README.en.md)
+
 把 Xbox One 的 **Kinect v2** 接进 Windows：一个脚本装完，程序里就能当摄像头用，还能开 **Windows Hello** 刷脸登录。
 
 > One-click installer for **Xbox One Kinect (v2) on Windows**. It registers Kinect as a DirectShow virtual

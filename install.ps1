@@ -38,10 +38,16 @@ $videoInputCategory = '{860BB310-5D01-11d0-BD3B-00A0C911CE86}'
 $frameworks         = @{ x86 = 'Framework'; x64 = 'Framework64' }
 
 function Write-Log {
-    param([string]$Message)
-    $line = "[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $Message
+    param([string]$Message, [string]$EnglishMessage)
+    $timestamp = Get-Date -Format 'HH:mm:ss'
+    $line = "[$timestamp] $Message"
     Write-Host $line
     try { Add-Content -LiteralPath $LogPath -Value $line -Encoding UTF8 } catch { }
+    if ($PSBoundParameters.ContainsKey('EnglishMessage')) {
+        $englishLine = "[$timestamp] $EnglishMessage"
+        Write-Host $englishLine
+        try { Add-Content -LiteralPath $LogPath -Value $englishLine -Encoding UTF8 } catch { }
+    }
 }
 
 function Test-Elevated {
@@ -55,9 +61,14 @@ function Resolve-HelloChoice {
     if ($Choice -ne 'Ask') { return $Choice }
     Write-Host ''
     Write-Host '是否同时启用 Windows Hello 人脸登录？' -ForegroundColor Yellow
+    Write-Host 'Enable Windows Hello facial sign-in too?' -ForegroundColor Yellow
     Write-Host '  y   = 装 Kinect 的 MF 驱动（从 Windows Update 下，约 70MB），之后可刷脸登录，需要重启'
+    Write-Host '  y   = Install the Kinect MF driver (about 70 MB from Windows Update); facial sign-in will require a restart'
     Write-Host '  回车 = 只装 DirectShow 虚拟摄像头，不动现有 Kinect 驱动'
-    $answer = Read-Host '启用请输入 y'
+    Write-Host '  Enter = Install only the DirectShow virtual camera; leave the current Kinect driver unchanged'
+    Write-Host '启用请输入 y'
+    Write-Host 'Enter y to enable'
+    $answer = Read-Host
     if ($answer -match '^\s*(y|yes)\s*$') { return 'Yes' }
     return 'No'
 }
@@ -100,7 +111,7 @@ public static class RmQuery {
             var l = new List<string>();
             for (int i = 0; i < cnt; i++)
                 l.Add(arr[i].strAppName.Trim() + " (PID " + arr[i].Process.dwProcessId + ")" +
-                      (arr[i].strServiceShortName != null && arr[i].strServiceShortName.Length > 0 ? " [服务 " + arr[i].strServiceShortName + "]" : ""));
+                      (arr[i].strServiceShortName != null && arr[i].strServiceShortName.Length > 0 ? " [Service " + arr[i].strServiceShortName + "]" : ""));
             return l.ToArray();
         } finally { RmEndSession(s); }
     }
@@ -133,10 +144,11 @@ function Get-FileHolder {
 # ============ 提权（提问必须在提权之前，否则新窗口里看不见） ============
 if (-not (Test-Elevated)) {
     if ($env:KINECTCAM_NO_ELEVATE) {
-        throw '安装需要管理员权限（写注册表 / 装驱动）。'
+        throw "安装需要管理员权限（写注册表 / 装驱动）。`nAdministrator privileges are required to write to the registry and install drivers."
     }
     $WindowsHello = Resolve-HelloChoice $WindowsHello
     Write-Host '需要管理员权限，正在弹出 UAC，请点"是"...'
+    Write-Host 'Administrator privileges are required. A UAC prompt is opening; click "Yes"...'
     $shell = (Get-Process -Id $PID).Path
     $argList = @(
         '-NoProfile', '-ExecutionPolicy', 'Bypass',
@@ -162,26 +174,26 @@ if (Test-Path -LiteralPath $LogPath) { Remove-Item -LiteralPath $LogPath -Force 
 
 # 提权后的进程窗口是隐藏的，出错必须写进日志，否则只看到一个退出码
 trap {
-    Write-Log ("!! 出错: {0}" -f $_.Exception.Message)
+    Write-Log ("!! 出错: {0}" -f $_.Exception.Message) ("!! Error: {0}" -f $_.Exception.Message)
     Write-Log ($_.ScriptStackTrace)
     exit 1
 }
 
-Write-Log "安装目录: $InstallDir"
-Write-Log "Windows Hello: $WindowsHello"
+Write-Log "安装目录: $InstallDir" "Install directory: $InstallDir"
+Write-Log "Windows Hello: $WindowsHello" "Windows Hello: $WindowsHello"
 
 $rebootNeeded = $false
 
 # ============ 第 1 步：DirectShow 虚拟摄像头 ============
-Write-Log '--- [1/2] DirectShow 虚拟摄像头 (KinectCamV2) ---'
+Write-Log '--- [1/2] DirectShow 虚拟摄像头 (KinectCamV2) ---' '--- [1/2] DirectShow virtual camera (KinectCamV2) ---'
 
 foreach ($arch in 'x86', 'x64') {
     $source = Join-Path $payloadRoot "bin\$arch"
-    if (-not (Test-Path -LiteralPath $source)) { throw "安装包不完整，缺少 $source" }
+    if (-not (Test-Path -LiteralPath $source)) { throw "安装包不完整，缺少 $source`nThe installation package is incomplete; missing: $source" }
 
     $regasm = Join-Path $env:WINDIR "Microsoft.NET\$($frameworks[$arch])\v4.0.30319\RegAsm.exe"
     $ngen   = Join-Path $env:WINDIR "Microsoft.NET\$($frameworks[$arch])\v4.0.30319\ngen.exe"
-    if (-not (Test-Path -LiteralPath $regasm)) { throw "找不到 RegAsm: $regasm" }
+    if (-not (Test-Path -LiteralPath $regasm)) { throw "找不到 RegAsm: $regasm`nRegAsm was not found: $regasm" }
 
     $target = Join-Path $InstallDir $arch
     New-Item -ItemType Directory -Force -Path $target | Out-Null
@@ -205,20 +217,20 @@ foreach ($arch in 'x86', 'x64') {
             }
         }
     }
-    Write-Log "[$arch] 文件已就绪: $copied 个已复制 -> $target"
+    Write-Log "[$arch] 文件已就绪: $copied 个已复制 -> $target" "[$arch] Files ready: copied $copied file(s) -> $target"
     if ($locked.Count -gt 0) {
-        Write-Log "[$arch] $($locked -join ', ') 正被占用，本次沿用目录里的旧文件"
+        Write-Log "[$arch] $($locked -join ', ') 正被占用，本次沿用目录里的旧文件" "[$arch] $($locked -join ', ') are in use; keeping the existing files in the destination"
         $holders = @()
         foreach ($name in $locked) {
             $holders += Get-FileHolder (Join-Path $target $name)
         }
         $holders = $holders | Where-Object { $_ } | Select-Object -Unique
         if ($holders.Count -gt 0) {
-            Write-Log "[$arch]   占用者: $($holders -join ', ')"
-            Write-Log "[$arch]   >> 关掉上面这些程序后再跑一次脚本，否则 $arch 还是旧版本"
+            Write-Log "[$arch]   占用者: $($holders -join ', ')" "[$arch]   Processes using the files: $($holders -join ', ')"
+            Write-Log "[$arch]   >> 关掉上面这些程序后再跑一次脚本，否则 $arch 还是旧版本" "[$arch]   >> Close the programs listed above and rerun the script, or $arch will remain on the old version"
         }
         else {
-            Write-Log "[$arch]   >> 查不到占用者，重启电脑后再跑一次脚本即可更新"
+            Write-Log "[$arch]   >> 查不到占用者，重启电脑后再跑一次脚本即可更新" "[$arch]   >> No process was found; restart the computer and rerun the script to update"
         }
     }
 
@@ -230,17 +242,17 @@ foreach ($arch in 'x86', 'x64') {
             $extra = @('/tlb:' + (Join-Path $target 'KinectCam.tlb'))
         }
         & $regasm /nologo /codebase $path @extra
-        if ($LASTEXITCODE -ne 0) { throw "RegAsm 注册失败 ($arch / $dll)，退出码 $LASTEXITCODE" }
-        Write-Log "[$arch] 已注册 $dll"
+        if ($LASTEXITCODE -ne 0) { throw "RegAsm 注册失败 ($arch / $dll)，退出码 $LASTEXITCODE`nRegAsm registration failed ($arch / $dll), exit code $LASTEXITCODE" }
+        Write-Log "[$arch] 已注册 $dll" "[$arch] Registered $dll"
     }
 
     try {
         & $ngen install (Join-Path $target 'BaseClassesNET.dll') | Out-Null
         & $ngen install (Join-Path $target 'KinectCam.dll') | Out-Null
-        Write-Log "[$arch] ngen 完成"
+        Write-Log "[$arch] ngen 完成" "[$arch] ngen completed"
     }
     catch {
-        Write-Log "[$arch] ngen 跳过: $($_.Exception.Message)"
+        Write-Log "[$arch] ngen 跳过: $($_.Exception.Message)" "[$arch] Skipping ngen: $($_.Exception.Message)"
     }
 }
 
@@ -255,17 +267,17 @@ foreach ($view in 'Registry64', 'Registry32') {
     if ($hasServer -and $hasCategory) {
         $ok++
         $friendly = (Get-ItemProperty -LiteralPath $instance -ErrorAction SilentlyContinue).FriendlyName
-        Write-Log "校验通过 [$view] 设备名: $friendly"
+        Write-Log "校验通过 [$view] 设备名: $friendly" "Validation passed [$view]; device name: $friendly"
     }
     else {
-        Write-Log "校验失败 [$view] COM组件=$hasServer 视频采集分类=$hasCategory"
+        Write-Log "校验失败 [$view] COM组件=$hasServer 视频采集分类=$hasCategory" "Validation failed [$view]; COM component=$hasServer, video-capture category=$hasCategory"
     }
 }
-if ($ok -eq 0) { throw 'DirectShow 滤镜注册表校验失败。' }
+if ($ok -eq 0) { throw "DirectShow 滤镜注册表校验失败。`nDirectShow filter registry validation failed." }
 
 # ============ 第 2 步：Windows Hello（可选） ============
 if ($WindowsHello -eq 'Yes') {
-    Write-Log '--- [2/2] Windows Hello 人脸登录 ---'
+    Write-Log '--- [2/2] Windows Hello 人脸登录 ---' '--- [2/2] Windows Hello facial sign-in ---'
 
     # 只认驱动 INF 里声明的这两个硬件 ID（Petra / Metra 的 Interface 0）。
     # 注意别用 PID_02D* 之类的宽匹配：Kinect 内置 USB Hub 是 PID_02D9，会被误命中。
@@ -277,12 +289,12 @@ if ($WindowsHello -eq 'Yes') {
         Select-Object -First 1
 
     if (-not $dev) {
-        Write-Log '未检测到 Kinect v2 设备（USB\VID_045E&PID_02C4 / 02D8），跳过 Windows Hello 部分。'
+        Write-Log '未检测到 Kinect v2 设备（USB\VID_045E&PID_02C4 / 02D8），跳过 Windows Hello 部分。' 'Kinect v2 was not detected (USB\VID_045E&PID_02C4 / 02D8); skipping Windows Hello setup.'
     }
     else {
         try {
             $ver = (Get-PnpDeviceProperty -InstanceId $dev.InstanceId -KeyName 'DEVPKEY_Device_DriverVersion' -ErrorAction Stop).Data
-            Write-Log "当前 Kinect 驱动版本: $ver"
+            Write-Log "当前 Kinect 驱动版本: $ver" "Current Kinect driver version: $ver"
         }
         catch { }
 
@@ -292,10 +304,10 @@ if ($WindowsHello -eq 'Yes') {
         $update   = $found.Updates | Where-Object { $_.Title -like '*KinectSensor*' } | Select-Object -First 1
 
         if (-not $update) {
-            Write-Log 'Windows Update 没有可用的 KinectSensor 驱动更新 —— 当前已是支持 Windows Hello 的驱动。'
+            Write-Log 'Windows Update 没有可用的 KinectSensor 驱动更新 —— 当前已是支持 Windows Hello 的驱动。' 'Windows Update has no KinectSensor driver update available; the current driver already supports Windows Hello.'
         }
         else {
-            Write-Log "找到驱动更新: $($update.Title)"
+            Write-Log "找到驱动更新: $($update.Title)" "Driver update found: $($update.Title)"
             $coll = New-Object -ComObject Microsoft.Update.UpdateColl
             [void]$coll.Add($update)
             $update.AcceptEula()
@@ -304,7 +316,7 @@ if ($WindowsHello -eq 'Yes') {
             $downloader.Updates = $coll
             $downloader.Priority = 3
             $dl = $downloader.Download()
-            Write-Log ("下载 ResultCode={0} HResult=0x{1:X8}" -f $dl.ResultCode, $dl.HResult)
+            Write-Log ("下载 ResultCode={0} HResult=0x{1:X8}" -f $dl.ResultCode, $dl.HResult) ("Download ResultCode={0} HResult=0x{1:X8}" -f $dl.ResultCode, $dl.HResult)
 
             if ($dl.ResultCode -eq 2 -or $dl.ResultCode -eq 3) {
                 $installer = $session.CreateUpdateInstaller()
@@ -312,36 +324,37 @@ if ($WindowsHello -eq 'Yes') {
                 $installer.AllowSourcePrompts = $false
                 $ins = $installer.Install()
                 Write-Log ("安装 ResultCode={0} HResult=0x{1:X8} RebootRequired={2}" -f `
+                    $ins.ResultCode, $ins.HResult, $ins.RebootRequired) ("Installation ResultCode={0} HResult=0x{1:X8} RebootRequired={2}" -f `
                     $ins.ResultCode, $ins.HResult, $ins.RebootRequired)
                 if ($ins.ResultCode -eq 2 -or $ins.ResultCode -eq 3) {
                     $rebootNeeded = $true
-                    Write-Log 'Kinect 驱动已安装。'
+                    Write-Log 'Kinect 驱动已安装。' 'The Kinect driver was installed.'
                 }
                 else {
-                    Write-Log "驱动安装失败 (ResultCode=$($ins.ResultCode))，Windows Hello 部分未完成。"
+                    Write-Log "驱动安装失败 (ResultCode=$($ins.ResultCode))，Windows Hello 部分未完成。" "Driver installation failed (ResultCode=$($ins.ResultCode)); Windows Hello setup is incomplete."
                 }
             }
             else {
-                Write-Log "驱动下载失败 (ResultCode=$($dl.ResultCode))，Windows Hello 部分未完成。"
+                Write-Log "驱动下载失败 (ResultCode=$($dl.ResultCode))，Windows Hello 部分未完成。" "Driver download failed (ResultCode=$($dl.ResultCode)); Windows Hello setup is incomplete."
             }
         }
     }
 }
 else {
-    Write-Log '--- [2/2] Windows Hello: 按选择跳过 ---'
+    Write-Log '--- [2/2] Windows Hello: 按选择跳过 ---' '--- [2/2] Windows Hello: skipped as requested ---'
 }
 
 # ============ 收尾 ============
 Write-Log ''
-Write-Log 'DirectShow 虚拟摄像头就绪，在任何程序里把摄像头切成 "Kinect Camera V2" 即可。'
+Write-Log 'DirectShow 虚拟摄像头就绪，在任何程序里把摄像头切成 "Kinect Camera V2" 即可。' 'The DirectShow virtual camera is ready. Select "Kinect Camera V2" as the camera in any application.'
 if ($WindowsHello -eq 'Yes') {
-    Write-Log 'Windows Hello 部分:'
-    Write-Log '  · 需要重启后生效；重启完进 设置 → 账户 → 登录选项，先设 PIN 再录入人脸。'
-    Write-Log '  · Kinect 也会以 "Kinect V2 Video Sensor" 出现在系统摄像头列表（Teams / 相机 App 可用）。'
-    Write-Log '  · 想撤销: 设备管理器 → WDF KinectSensor Interface 0 → 属性 → 驱动程序 → 回退驱动程序。'
-    Write-Log '  · 核查脚本: ..\kinect-windows-hello\verify.ps1'
+    Write-Log 'Windows Hello 部分:' 'Windows Hello:'
+    Write-Log '  · 需要重启后生效；重启完进 设置 → 账户 → 登录选项，先设 PIN 再录入人脸。' '  · Restart for the changes to take effect. Then go to Settings → Accounts → Sign-in options, set a PIN, and enroll your face.'
+    Write-Log '  · Kinect 也会以 "Kinect V2 Video Sensor" 出现在系统摄像头列表（Teams / 相机 App 可用）。' '  · Kinect will also appear as "Kinect V2 Video Sensor" in the system camera list (available in Teams and the Camera app).'
+    Write-Log '  · 想撤销: 设备管理器 → WDF KinectSensor Interface 0 → 属性 → 驱动程序 → 回退驱动程序。' '  · To undo: in Device Manager, open WDF KinectSensor Interface 0 → Properties → Driver → Roll Back Driver.'
+    Write-Log '  · 核查脚本: ..\kinect-windows-hello\verify.ps1' '  · Verification script: ..\kinect-windows-hello\verify.ps1'
 }
 if ($rebootNeeded) {
-    Write-Log '>> 请重启电脑，驱动才会完全生效。'
+    Write-Log '>> 请重启电脑，驱动才会完全生效。' '>> Restart the computer for the driver changes to take full effect.'
 }
-Write-Log '安装脚本执行完毕。'
+Write-Log '安装脚本执行完毕。' 'Installation script finished.'

@@ -11,7 +11,15 @@ param(
 
 $ErrorActionPreference = 'Continue'
 
-function Write-Log { param([string]$m) ; Write-Host $m; try { Add-Content -LiteralPath $LogPath -Value $m -Encoding UTF8 } catch { } }
+function Write-Log {
+    param([string]$Message, [string]$EnglishMessage)
+    Write-Host $Message
+    try { Add-Content -LiteralPath $LogPath -Value $Message -Encoding UTF8 } catch { }
+    if ($PSBoundParameters.ContainsKey('EnglishMessage')) {
+        Write-Host $EnglishMessage
+        try { Add-Content -LiteralPath $LogPath -Value $EnglishMessage -Encoding UTF8 } catch { }
+    }
+}
 
 function Test-Elevated {
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -70,7 +78,7 @@ public static class RmQuery {
             if (rv != 0) return new string[] { "RmRegisterResources 0x" + rv.ToString("X8") };
             uint needed = 0, count = 0, reason = 0;
             rv = RmGetList(session, out needed, ref count, null, ref reason);
-            if (needed == 0) return new string[] { "没有进程占用" };
+            if (needed == 0) return new string[] { "没有进程占用\nNo process is using the file" };
             var arr = new RM_PROCESS_INFO[needed];
             count = needed;
             rv = RmGetList(session, out needed, ref count, arr, ref reason);
@@ -87,19 +95,23 @@ public static class RmQuery {
 }
 '@
 
-try { Add-Type -TypeDefinition $sig -ErrorAction Stop } catch { Write-Log "Add-Type 失败: $($_.Exception.Message)"; exit 1 }
+try { Add-Type -TypeDefinition $sig -ErrorAction Stop } catch { Write-Log "Add-Type 失败: $($_.Exception.Message)" "Add-Type failed: $($_.Exception.Message)"; exit 1 }
 
 foreach ($p in $Path) {
-    Write-Log "=== $p ==="
-    if (-not (Test-Path -LiteralPath $p)) { Write-Log '  文件不存在'; continue }
+    Write-Log "=== $p ===" "=== $p ==="
+    if (-not (Test-Path -LiteralPath $p)) { Write-Log '  文件不存在' '  File does not exist'; continue }
     try {
         $fs = [IO.File]::Open($p, 'Open', 'ReadWrite', 'None')
         $fs.Close()
-        Write-Log '  没有被占用（可以独占打开）'
+        Write-Log '  没有被占用（可以独占打开）' '  Not in use (can be opened exclusively)'
     }
     catch {
-        Write-Log '  被占用中，占用者：'
-        [RmQuery]::Who($p) | ForEach-Object { Write-Log "    $_" }
+        Write-Log '  被占用中，占用者：' '  In use by:'
+        [RmQuery]::Who($p) | ForEach-Object {
+            $lines = $_ -split "`n", 2
+            if ($lines.Count -gt 1) { Write-Log "    $($lines[0])" "    $($lines[1])" }
+            else { Write-Log "    $_" "    $_" }
+        }
     }
 }
-Write-Log '结束。'
+Write-Log '结束。' 'Finished.'

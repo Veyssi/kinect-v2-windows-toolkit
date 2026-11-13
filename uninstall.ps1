@@ -25,8 +25,12 @@ $ErrorActionPreference = 'Stop'
 $frameworks = @{ x86 = 'Framework'; x64 = 'Framework64' }
 
 function Write-Log {
-    param([string]$Message)
-    Write-Host ("[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $Message)
+    param([string]$Message, [string]$EnglishMessage)
+    $timestamp = Get-Date -Format 'HH:mm:ss'
+    Write-Host "[$timestamp] $Message"
+    if ($PSBoundParameters.ContainsKey('EnglishMessage')) {
+        Write-Host "[$timestamp] $EnglishMessage"
+    }
 }
 
 function Test-Elevated {
@@ -59,14 +63,14 @@ foreach ($arch in 'x64', 'x86') {
         $path = Join-Path $target $dll
         if (-not (Test-Path -LiteralPath $path)) { continue }
         & $regasm /nologo /unregister $path
-        Write-Log "[$arch] 已注销 $dll (退出码 $LASTEXITCODE)"
+        Write-Log "[$arch] 已注销 $dll (退出码 $LASTEXITCODE)" "[$arch] Unregistered $dll (exit code $LASTEXITCODE)"
         try { & $ngen uninstall $path | Out-Null } catch { }
     }
 }
 
 # ---------- 2. 卸掉 Windows Hello 用的 Kinect 驱动（可选） ----------
 if ($RemoveKinectDriver) {
-    Write-Log '--- 移除 Kinect 的 2019 版驱动（Windows Hello 相关） ---'
+    Write-Log '--- 移除 Kinect 的 2019 版驱动（Windows Hello 相关） ---' '--- Removing the 2019 Kinect driver (used by Windows Hello) ---'
     $pkg = $null
     try {
         $pkg = Get-WindowsDriver -Online -ErrorAction Stop |
@@ -74,27 +78,27 @@ if ($RemoveKinectDriver) {
             Select-Object -First 1
     }
     catch {
-        Write-Log "Get-WindowsDriver 失败: $($_.Exception.Message)"
+        Write-Log "Get-WindowsDriver 失败: $($_.Exception.Message)" "Get-WindowsDriver failed: $($_.Exception.Message)"
     }
 
     if (-not $pkg) {
-        Write-Log '没找到 2.2.1905.16000 版驱动包，可能已经移除过了。'
+        Write-Log '没找到 2.2.1905.16000 版驱动包，可能已经移除过了。' 'Driver package version 2.2.1905.16000 was not found; it may already have been removed.'
     }
     else {
-        Write-Log "删除驱动包: $($pkg.Driver)  [$($pkg.Version)]"
+        Write-Log "删除驱动包: $($pkg.Driver)  [$($pkg.Version)]" "Removing driver package: $($pkg.Driver)  [$($pkg.Version)]"
         & pnputil /delete-driver $pkg.Driver /uninstall /force
-        Write-Log "pnputil 退出码: $LASTEXITCODE"
+        Write-Log "pnputil 退出码: $LASTEXITCODE" "pnputil exit code: $LASTEXITCODE"
         Start-Sleep -Seconds 2
         & pnputil /scan-devices | Out-Null
-        Write-Log '已重新扫描设备（设备会退回 DriverStore 里的旧驱动）。'
-        Write-Log '>> 请重启电脑。设备管理器里也可以随时用「回退驱动程序」做同样的事。'
+        Write-Log '已重新扫描设备（设备会退回 DriverStore 里的旧驱动）。' 'Devices rescanned (they will revert to the older driver in the DriverStore).'
+        Write-Log '>> 请重启电脑。设备管理器里也可以随时用「回退驱动程序」做同样的事。' '>> Restart the computer. You can also use "Roll Back Driver" in Device Manager at any time.'
     }
 }
 
 # ---------- 3. 删文件 ----------
 if ($RemoveFiles -and (Test-Path -LiteralPath $InstallDir)) {
     Remove-Item -LiteralPath $InstallDir -Recurse -Force
-    Write-Log "已删除 $InstallDir"
+    Write-Log "已删除 $InstallDir" "Removed $InstallDir"
 }
 
-Write-Log '卸载完成。'
+Write-Log '卸载完成。' 'Uninstallation complete.'
